@@ -1,0 +1,40 @@
+# SmolVLA × ManiSkill (PickCube-v1) Configuration
+# Save as: ../configs/smolvla_franka_config.yaml
+
+model:
+  repo_id: "Calvert0921/smolvla_franka_liftredcube5_200"
+  device: "cuda"   # or "cpu"
+
+task:
+  instruction: "pick up the red cube"
+  img_size: 256
+
+maniskill:
+  env_id: "PickCube-v1"
+  obs_mode: "rgb"                 # rgb | rgbd | state_dict (must include RGB for the model)
+  control_mode: "pd_joint_delta_pos"
+  seed: 0
+
+# Simulation pacing (GUI smoothness + policy tick rate)
+simulation:
+  step_hz: 60                     # GUI pacing; not ManiSkill physics
+  ctrl_hz: 10                     # how often we query the policy
+  use_gui: true
+
+# Safety clamps applied to the model's 8-dim delta action before env.step()
+safety:
+  enable_joint_delta_limiting: false
+  max_joint_delta: 0.5           # rad per control step (applies to 7 arm joints)
+  max_gripper_delta: 0.5         # gripper width delta per step (env units)
+  # NOTE: height/workspace protections were PyBullet-specific, so we omit them here.
+
+# Camera selection hints (the script will pick best matches from obs keys)
+io_mapping:
+  wrist_hints: ["wrist", "hand", "gripper", "ee"]
+  up_hints: ["overhead", "top", "base", "front", "3rd", "static"]
+  # If only one camera is found, it will be used for both "wrist" and "up".
+
+debug:
+  print_actions_every: 30
+  print_status_every: 60
+  print_limit_warnings_every: 30
