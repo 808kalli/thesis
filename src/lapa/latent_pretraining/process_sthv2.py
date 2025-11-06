@@ -1,4 +1,4 @@
-'''
+"""
 Usage:
 
 python process_sthv2.py \
@@ -6,7 +6,7 @@ python process_sthv2.py \
     --labels_json ~/Thesis/raw_datasets/sthv2/train.json \
     --lapa_checkpoint /path/to/lapa/checkpoint \
     --output_dir ~/Thesis/teacher_latents \
-'''
+"""
 
 import argparse
 import json
@@ -22,6 +22,10 @@ from latent_pretraining.delta_llama import VideoLLaMAConfig
 from tux import JaxDistributedConfig, set_random_seed
 
 
+# ---------------------------------------------------------------------------- #
+#                               Helper Classes                                 #
+# ---------------------------------------------------------------------------- #
+
 class FLAGSClass:
     def __init__(self, flag_dict):
         for key, value in flag_dict.items():
@@ -35,7 +39,6 @@ class LAPAInference:
         **kwargs,
     ) -> None:
         flags = FLAGSClass(kwargs)
-
         self.model = DeltaSampler(FLAGS=flags)
         self.image_size = image_size
         self.tokens_per_delta = kwargs['tokens_per_delta']
@@ -45,40 +48,26 @@ class LAPAInference:
         assert image.dtype == np.uint8
         image = Image.fromarray(image)
         prompts = [{'image': [image], 'question': task_description}]
-
         latent_output = self.model(prompts)
         latent_action = latent_output[0]
-
         return latent_action
 
 
+# ---------------------------------------------------------------------------- #
+#                          Dataset Processing Logic                            #
+# ---------------------------------------------------------------------------- #
+
 def load_video_frames(video_path: Path, frame_offset: int = 30):
-    """
-    Load video frames with specified offset between frames.
-
-    Args:
-        video_path: Path to video file (.webm)
-        frame_offset: Distance between frames to sample
-
-    Returns:
-        List of frames as numpy arrays
-    """
+    """Load frames every `frame_offset` frames."""
     cap = cv2.VideoCapture(str(video_path))
-    frames = []
-    frame_idx = 0
-
+    frames, frame_idx = [], 0
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-
         if frame_idx % frame_offset == 0:
-            # Convert BGR to RGB
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(frame_rgb)
-
+            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         frame_idx += 1
-
     cap.release()
     return frames
 
@@ -91,108 +80,111 @@ def process_sthv2_dataset(
     frame_offset: int = 30,
     image_size: int = 256,
 ):
-    """
-    Process Something-Something V2 dataset and generate LAPA teacher latents.
-
-    Args:
-        videos_dir: Directory containing .webm videos (named 1.webm, 2.webm, etc.)
-        labels_json: Path to train.json containing labels and IDs
-        output_dir: Output directory for .npy files
-        lapa_checkpoint: Path to LAPA checkpoint
-        frame_offset: Frame sampling offset
-        image_size: Image size for LAPA
-    """
-    # Load train.json to get valid video IDs and labels
+    """Main processing loop."""
+    # ---------------- Load dataset ----------------
     with open(labels_json, 'r') as f:
         train_data = json.load(f)
-
-    # Create id -> label mapping and extract valid IDs
     id_to_label = {item['id']: item['label'] for item in train_data}
     valid_ids = set(id_to_label.keys())
-
     print(f"Loaded {len(valid_ids)} valid video IDs from {labels_json}")
 
-    # Create output directory
+    # ---------------- Setup output ----------------
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize LAPA model
+    # ---------------- Initialize LAPA ----------------
     print("Loading LAPA model...")
+
+    tokenizer = VideoLLaMAConfig.get_tokenizer_config()
+    llama = VideoLLaMAConfig.get_default_config()
+    tokenizer.vocab_file = "lapa_checkpoints/tokenizer.model"
+
+    # Distributed and random seed init
+    jax_dist_cfg = JaxDistributedConfig.get_default_config()
+    JaxDistributedConfig.initialize(jax_dist_cfg)
+    set_random_seed(1234)
+
     lapa_config = {
         'image_size': image_size,
-        'checkpoint_path': str(lapa_checkpoint),
-        'tokens_per_delta': 4,  # LAPA uses 4 latent action tokens
+        'tokens_per_delta': 4,
+        'vqgan_checkpoint': 'lapa_checkpoints/vqgan',
+        'vocab_file': 'lapa_checkpoints/tokenizer.model',
+        'multi_image': 1,
+        'jax_distributed': jax_dist_cfg,
+        'seed': 1234,
+        'mesh_dim': "1,-1,1,1",
+        'dtype': "bf16",
+        'load_llama_config': "7b",
+        'update_llama_config': "dict(delta_vocab_size=8,sample_mode='text',theta=50000000,max_sequence_length=32768,scan_attention=False,scan_query_chunk_size=128,scan_key_chunk_size=128,scan_mlp=False,scan_mlp_chunk_size=8192,scan_layers=True)",
+        'load_checkpoint': f"params::{lapa_checkpoint}",
+        'codebook_size': 8,
+        'tokenizer': tokenizer,
+        'llama': llama,
     }
-    lapa_model = LAPAInference(**lapa_config)
-    print("LAPA model loaded ✅")
 
-    # Get all video files and filter by valid IDs
+    lapa_model = LAPAInference(**lapa_config)
+    print("✅ LAPA model loaded successfully")
+
+    # ---------------- Collect videos ----------------
     all_video_files = list(videos_dir.glob("*.webm"))
     video_files = [v for v in all_video_files if v.stem in valid_ids]
 
-    print(f"Found {len(video_files)} / {len(all_video_files)} videos matching train.json IDs")
+    print(f"Found {len(video_files)} / {len(all_video_files)} valid videos.")
     print(f"Frame offset: {frame_offset}")
-    print(f"Output directory: {output_dir}")
+    print(f"Output dir: {output_dir}")
 
-    # Process each video
+    # ---------------- Process videos ----------------
     for video_path in tqdm(video_files, desc="Processing videos"):
-        video_id = video_path.stem  # e.g., "78687"
+        video_id = video_path.stem
         instruction = id_to_label[video_id]
-
-        # Load frames with offset
         try:
             frames = load_video_frames(video_path, frame_offset)
-
-            if len(frames) == 0:
-                print(f"Warning: No frames extracted from {video_id}, skipping")
+            if not frames:
+                print(f"⚠️  No frames extracted from {video_id}, skipping.")
                 continue
 
-            # Use the first frame as RGB observation (or middle frame)
-            # For distillation, we use a single frame similar to OpenVLA's single-image input
-            middle_idx = len(frames) // 2
-            rgb_frame = frames[middle_idx]
-
-            # Resize to expected image size
+            # Use middle frame
+            rgb_frame = frames[len(frames) // 2]
             rgb_frame_resized = cv2.resize(rgb_frame, (image_size, image_size))
 
-            # Generate teacher latent using LAPA
+            # Run inference
             teacher_latent = lapa_model.inference(
                 image=rgb_frame_resized,
                 task_description=instruction
             )
 
-            # Save to .npy with format: (rgb, prompt, teacher_latent, id)
+            # Save to .npy
             output_path = output_dir / f"{video_id}.npy"
             np.save(
                 output_path,
                 {
-                    'rgb': rgb_frame_resized,  # [H, W, C] uint8
-                    'prompt': instruction,      # str
-                    'teacher_latent': teacher_latent,  # [4] latent action tokens
-                    'id': video_id,            # str
+                    'rgb': rgb_frame_resized,
+                    'prompt': instruction,
+                    'teacher_latent': teacher_latent,
+                    'id': video_id,
                 },
                 allow_pickle=True
             )
 
         except Exception as e:
-            print(f"Error processing video {video_id}: {e}")
+            print(f"❌ Error processing {video_id}: {e}")
             continue
 
 
+# ---------------------------------------------------------------------------- #
+#                                     Main                                     #
+# ---------------------------------------------------------------------------- #
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Process Something-Something V2 dataset and generate LAPA teacher latents"
+        description="Generate LAPA teacher latents from Something-Something V2 videos"
     )
 
-    # Dataset paths
-    parser.add_argument('--videos_dir', type=str,
-                        default='~/Thesis/raw_datasets/sthv2/20bn-something-something-v2',
+    parser.add_argument('--videos_dir', type=str, required=True,
                         help='Directory containing .webm videos')
-    parser.add_argument('--labels_json', type=str,
-                        default='~/Thesis/raw_datasets/sthv2/train.json',
+    parser.add_argument('--labels_json', type=str, required=True,
                         help='Path to train.json with labels and IDs')
-    parser.add_argument('--output_dir', type=str,
-                        default='~/Thesis/teacher_latents',
-                        help='Output directory for .npy files with teacher latents')
+    parser.add_argument('--output_dir', type=str, required=True,
+                        help='Output directory for .npy files')
     parser.add_argument('--lapa_checkpoint', type=str, required=True,
                         help='Path to LAPA checkpoint')
     parser.add_argument('--frame_offset', type=int, default=30,
@@ -202,21 +194,18 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Expand paths
     videos_dir = Path(args.videos_dir).expanduser()
     labels_json = Path(args.labels_json).expanduser()
     output_dir = Path(args.output_dir).expanduser()
     lapa_checkpoint = Path(args.lapa_checkpoint).expanduser()
 
-    # Validate paths
     if not videos_dir.exists():
-        raise FileNotFoundError(f"Videos directory not found: {videos_dir}")
+        raise FileNotFoundError(f"Videos dir not found: {videos_dir}")
     if not labels_json.exists():
-        raise FileNotFoundError(f"Labels file not found: {labels_json}")
+        raise FileNotFoundError(f"Labels JSON not found: {labels_json}")
     if not lapa_checkpoint.exists():
         raise FileNotFoundError(f"LAPA checkpoint not found: {lapa_checkpoint}")
 
-    # Process dataset
     process_sthv2_dataset(
         videos_dir=videos_dir,
         labels_json=labels_json,
@@ -226,4 +215,4 @@ if __name__ == "__main__":
         image_size=args.image_size,
     )
 
-    print(f"\nProcessing complete! Files saved to {output_dir}")
+    print(f"\n✅ Processing complete! Files saved to {output_dir}")
