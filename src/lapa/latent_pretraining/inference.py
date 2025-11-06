@@ -50,7 +50,7 @@ if __name__ == "__main__":
     parser.add_argument('--dtype', type=str, default="bf16")
     parser.add_argument('--load_llama_config', type=str, default="7b")
     parser.add_argument('--update_llama_config', type=str, default="dict(delta_vocab_size=8,sample_mode='text',theta=50000000,max_sequence_length=32768,scan_attention=False,scan_query_chunk_size=128,scan_key_chunk_size=128,scan_mlp=False,scan_mlp_chunk_size=8192,scan_layers=True)")
-    parser.add_argument('--load_checkpoint', type=str, default="params::lapa_checkpoints/params")
+    parser.add_argument('--load_checkpoint', type=str, default="params::lapa_checkpoints/params_sthv2")
     parser.add_argument('--codebook_size', type=int, default=8)
 
 
