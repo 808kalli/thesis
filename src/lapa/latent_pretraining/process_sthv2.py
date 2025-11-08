@@ -160,34 +160,33 @@ def process_sthv2_dataset(
                 print(f"⚠️  No frames extracted from {video_id}, skipping.")
                 continue
 
-            # Get actions for all frames
-            teacher_latents = []
-            rgb_frames_resized = []
+            # Process each frame individually and save to separate .npy files
+            for interval_idx, frame in enumerate(frames):
+                # Actual video frame number (0, 30, 60, ...)
+                actual_frame_num = interval_idx * 30
 
-            for frame in frames:
                 rgb_frame_resized = cv2.resize(frame, (image_size, image_size))
-                rgb_frames_resized.append(rgb_frame_resized)
 
                 # Run inference
                 teacher_latent = lapa_model.inference(
                     image=rgb_frame_resized,
                     task_description=instruction
                 )
-                teacher_latents.append(teacher_latent)
 
-            # Save all actions to .npy
-            output_path = output_dir / f"{video_id}.npy"
-            np.save(
-                output_path,
-                {
-                    'rgb_frames': np.array(rgb_frames_resized),
-                    'prompt': instruction,
-                    'teacher_latents': teacher_latents,
-                    'num_frames': len(frames),
-                    'id': video_id,
-                },
-                allow_pickle=True
-            )
+                # Save individual frame + action to .npy
+                # Filename format: {video_id}_{actual_frame_number}.npy
+                output_path = output_dir / f"{video_id}_{actual_frame_num}.npy"
+                np.save(
+                    output_path,
+                    {
+                        'rgb': rgb_frame_resized,
+                        'prompt': instruction,
+                        'teacher_latent': teacher_latent,
+                        'video_id': video_id,
+                        'frame_number': actual_frame_num,
+                    },
+                    allow_pickle=True
+                )
 
         except Exception as e:
             print(f"❌ Error processing {video_id}: {e}")
