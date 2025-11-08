@@ -1,11 +1,10 @@
 """
 Usage:
 
-python process_sthv2.py \
-    --videos_dir ~/Thesis/raw_datasets/sthv2/20bn-something-something-v2 \
-    --labels_json ~/Thesis/raw_datasets/sthv2/train.json \
-    --lapa_checkpoint /path/to/lapa/checkpoint \
-    --output_dir ~/Thesis/teacher_latents \
+python -m latent_pretraining.process_sthv2 --videos_dir /workspace/thesis/raw_datasets/sthv2/20bn-something-something-v2 \
+      --labels_json /workspace/thesis/raw_datasets/sthv2/train.json \
+      --lapa_checkpoint /workspace/thesis/src/lapa/lapa_checkpoints/params_sthv2 \
+      --output_dir /workspace/thesis/lapa_latents
 """
 
 import argparse
