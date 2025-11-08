@@ -57,19 +57,37 @@ class LAPAInference:
 #                          Dataset Processing Logic                            #
 # ---------------------------------------------------------------------------- #
 
-def load_video_frames(video_path: Path, frame_offset: int = 30):
-    """Load frames every `frame_offset` frames."""
+def load_video_frames_at_intervals(video_path: Path, frame_interval: int = 30):
+    """Load frames at 30-frame intervals (0, 30, 60, ...).
+
+    If video has fewer than 30 frames, only return frame 0.
+    """
     cap = cv2.VideoCapture(str(video_path))
-    frames, frame_idx = [], 0
+    all_frames = []
+    frame_idx = 0
+
+    # Load all frames from video
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-        if frame_idx % frame_offset == 0:
-            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        all_frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         frame_idx += 1
+
     cap.release()
-    return frames
+
+    # If fewer than 30 frames, return only frame 0
+    if len(all_frames) < frame_interval:
+        return [all_frames[0]] if all_frames else []
+
+    # Otherwise, return frames at intervals: 0, 30, 60, ...
+    frames_at_intervals = []
+    idx = 0
+    while idx < len(all_frames):
+        frames_at_intervals.append(all_frames[idx])
+        idx += frame_interval
+
+    return frames_at_intervals
 
 
 def process_sthv2_dataset(
@@ -77,7 +95,7 @@ def process_sthv2_dataset(
     labels_json: Path,
     output_dir: Path,
     lapa_checkpoint: Path,
-    frame_offset: int = 30,
+    num_frames: int = 30,
     image_size: int = 256,
 ):
     """Main processing loop."""
@@ -129,7 +147,7 @@ def process_sthv2_dataset(
     video_files = [v for v in all_video_files if v.stem in valid_ids]
 
     print(f"Found {len(video_files)} / {len(all_video_files)} valid videos.")
-    print(f"Frame offset: {frame_offset}")
+    print(f"Num frames per video: {num_frames}")
     print(f"Output dir: {output_dir}")
 
     # ---------------- Process videos ----------------
@@ -137,29 +155,35 @@ def process_sthv2_dataset(
         video_id = video_path.stem
         instruction = id_to_label[video_id]
         try:
-            frames = load_video_frames(video_path, frame_offset)
+            frames = load_video_frames_at_intervals(video_path, frame_interval=30)
             if not frames:
                 print(f"⚠️  No frames extracted from {video_id}, skipping.")
                 continue
 
-            # Use middle frame
-            rgb_frame = frames[len(frames) // 2]
-            rgb_frame_resized = cv2.resize(rgb_frame, (image_size, image_size))
+            # Get actions for all frames
+            teacher_latents = []
+            rgb_frames_resized = []
 
-            # Run inference
-            teacher_latent = lapa_model.inference(
-                image=rgb_frame_resized,
-                task_description=instruction
-            )
+            for frame in frames:
+                rgb_frame_resized = cv2.resize(frame, (image_size, image_size))
+                rgb_frames_resized.append(rgb_frame_resized)
 
-            # Save to .npy
+                # Run inference
+                teacher_latent = lapa_model.inference(
+                    image=rgb_frame_resized,
+                    task_description=instruction
+                )
+                teacher_latents.append(teacher_latent)
+
+            # Save all actions to .npy
             output_path = output_dir / f"{video_id}.npy"
             np.save(
                 output_path,
                 {
-                    'rgb': rgb_frame_resized,
+                    'rgb_frames': np.array(rgb_frames_resized),
                     'prompt': instruction,
-                    'teacher_latent': teacher_latent,
+                    'teacher_latents': teacher_latents,
+                    'num_frames': len(frames),
                     'id': video_id,
                 },
                 allow_pickle=True
@@ -187,8 +211,8 @@ if __name__ == "__main__":
                         help='Output directory for .npy files')
     parser.add_argument('--lapa_checkpoint', type=str, required=True,
                         help='Path to LAPA checkpoint')
-    parser.add_argument('--frame_offset', type=int, default=30,
-                        help='Frame sampling offset (distance between frames)')
+    parser.add_argument('--num_frames', type=int, default=30,
+                        help='Number of frames to extract from start of video')
     parser.add_argument('--image_size', type=int, default=256,
                         help='Image size for LAPA model')
 
@@ -211,7 +235,7 @@ if __name__ == "__main__":
         labels_json=labels_json,
         output_dir=output_dir,
         lapa_checkpoint=lapa_checkpoint,
-        frame_offset=args.frame_offset,
+        num_frames=args.num_frames,
         image_size=args.image_size,
     )
 
