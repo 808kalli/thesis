@@ -75,14 +75,13 @@ class DistillConfig:
     distill_loss_type: str = "mse"
     distill_loss_weight: float = 1.0
     contrastive_loss_weight: float = 0.5
-    contrastive_loss_type: str = "similarity_structure"    # "similarity_structure": MSE of similarity matrices (student-student vs teacher-teacher)
+    contrastive_loss_type: str = "contrastive"    # "similarity_structure": MSE of similarity matrices (student-student vs teacher-teacher)
                                                           # "kl_divergence": KL divergence of similarity matrices (student-student vs teacher-teacher)
                                                           # "contrastive": contrastive loss (student[i] vs teacher[i])
     align_dim: int = 4
     align_hidden_dim: int = 64     #hidden projection dimentioni to grasp complex relationships between the 2 latent action spaces (7 → 64 → 4)
 
     # --- new additions ---
-    grad_accumulation_steps: int = 4
     lr_scheduler_type: str = "cosine"
     warmup_ratio: float = 0.03
 
@@ -405,7 +404,7 @@ def distill(cfg: DistillConfig) -> None:
     dataset = VLADistillDataset(cfg.teacher_latent_dir)
     # Batch size > 1 required for contrastive loss to work
     # Adjust based on GPU memory (16 is reasonable for 40GB GPU)
-    batch_size = 16
+    batch_size = 64
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     overwatch.info(
         f"Loaded {len(dataset)} distillation samples with batch_size={batch_size}\n"
@@ -420,7 +419,7 @@ def distill(cfg: DistillConfig) -> None:
     trainable_params = list(vlm.parameters())
     optimizer = torch.optim.AdamW(trainable_params, lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
 
-    total_steps = (cfg.epochs * len(dataloader)) // max(1, cfg.grad_accumulation_steps)
+    total_steps = cfg.epochs * len(dataloader)
     warmup_steps = int(cfg.warmup_ratio * total_steps)
     scheduler = get_scheduler(
         cfg.lr_scheduler_type,
@@ -447,7 +446,6 @@ def distill(cfg: DistillConfig) -> None:
     # ------------------------------------------------------------
     for epoch in range(cfg.epochs):
         with tqdm(dataloader, desc=f"Epoch {epoch+1}", disable=not overwatch.is_rank_zero()) as progress:
-            optimizer.zero_grad()
             for step, batch in enumerate(dataloader):
                 # Prepare batch data
                 images = batch["image"].to(device_id)  # [batch, C, H, W]
@@ -503,58 +501,44 @@ def distill(cfg: DistillConfig) -> None:
                         contrastive_type=cfg.contrastive_loss_type
                     )
 
-                # --- gradient accumulation ---
-                loss = loss / max(1, cfg.grad_accumulation_steps)
+                # --- backward pass and optimizer step ---
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(vlm.parameters(), cfg.max_grad_norm)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+                global_step += 1
 
-                did_step = False
-                if ((step + 1) % max(1, cfg.grad_accumulation_steps)) == 0:
-                    # Clip gradients (includes distill_projection params since they're in vlm.parameters())
-                    torch.nn.utils.clip_grad_norm_(vlm.parameters(), cfg.max_grad_norm)
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    global_step += 1
-                    did_step = True
-
-                    # Save checkpoint every save_interval steps
-                    if overwatch.is_rank_zero() and (global_step % cfg.save_interval == 0):
-                        ckpt_path = run_dir / "checkpoints" / f"step_{global_step}.pt"
-                        torch.save(
-                            {
-                                "model": vlm.state_dict(),  # Includes distill_projection
-                                "optimizer": optimizer.state_dict(),
-                                "scheduler": scheduler.state_dict(),
-                                "epoch": epoch,
-                                "step": global_step,
-                            },
-                            ckpt_path,
-                        )
-                        overwatch.info(f"Saved checkpoint at {ckpt_path}")
+                # Save checkpoint every save_interval steps
+                if overwatch.is_rank_zero() and (global_step % cfg.save_interval == 0):
+                    ckpt_path = run_dir / "checkpoints" / f"step_{global_step}.pt"
+                    torch.save(
+                        {
+                            "model": vlm.state_dict(),  # Includes distill_projection
+                            "optimizer": optimizer.state_dict(),
+                            "scheduler": scheduler.state_dict(),
+                            "epoch": epoch,
+                            "step": global_step,
+                        },
+                        ckpt_path,
+                    )
+                    overwatch.info(f"Saved checkpoint at {ckpt_path}")
 
                 # --- metrics ---
-                if did_step:
-                    metrics.commit(
-                        loss=loss_dict["total_loss"],
-                        embed_loss=loss_dict["embed_loss"],
-                        contrast_loss=loss_dict["contrast_loss"],
-                        lr=scheduler.get_last_lr()[0]
-                    )
-                else:
-                    metrics.commit(
-                        loss=loss_dict["total_loss"],
-                        embed_loss=loss_dict["embed_loss"],
-                        contrast_loss=loss_dict["contrast_loss"]
-                    )
+                metrics.commit(
+                    loss=loss_dict["total_loss"],
+                    embed_loss=loss_dict["embed_loss"],
+                    contrast_loss=loss_dict["contrast_loss"],
+                    lr=scheduler.get_last_lr()[0]
+                )
 
                 if overwatch.is_rank_zero():
                     postfix = {
                         "total": f"{loss_dict['total_loss']:.4f}",
                         "embed": f"{loss_dict['embed_loss']:.4f}",
-                        "contr": f"{loss_dict['contrast_loss']:.4f}"
+                        "contr": f"{loss_dict['contrast_loss']:.4f}",
+                        "lr": f"{scheduler.get_last_lr()[0]:.2e}"
                     }
-                    if did_step:
-                        postfix["lr"] = f"{scheduler.get_last_lr()[0]:.2e}"
                     progress.set_postfix(postfix)
 
         # Save checkpoint per epoch

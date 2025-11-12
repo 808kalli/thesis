@@ -4,6 +4,8 @@ raw_datasets/
 models/
 logs/
 rollouts/
+lapa_latents/
+openvla_outputs/
 
 # === Python + Runtime Artifacts ===
 __pycache__/
@@ -16,6 +18,7 @@ __pycache__/
 *.log
 *.tmp
 *.bak
+lapa_latents.tar.gz
 
 # === Environment / Build Files ===
 .env
