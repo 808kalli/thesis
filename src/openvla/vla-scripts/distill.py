@@ -753,6 +753,10 @@ def distill(cfg: DistillConfig) -> None:
                 )
 
                 teacher_hidden = batch["teacher_latent"].to(device_id)  # [batch, 4]
+
+                # Save raw teacher latents for logging before processing
+                teacher_latent_raw = teacher_hidden.clone()
+
                 teacher_hidden = (teacher_hidden / 7.0) * 2.0 - 1.0  # normalize to [-1, 1]
                 # ========================================
                 # APPLY NON-LEARNABLE LAYER NORMALIZATION TO TEACHER LATENT
@@ -785,8 +789,8 @@ def distill(cfg: DistillConfig) -> None:
                     log_print(f"{'='*80}")
                     log_print(f"\nStudent Latent Projected (shape: {student_latent_projected.shape}):")
                     log_print(str(student_latent_projected.detach().cpu().float().numpy()))
-                    log_print(f"\nTeacher Hidden (shape: {teacher_hidden.shape}):")
-                    log_print(str(teacher_hidden.detach().cpu().float().numpy()))
+                    log_print(f"\nTeacher Latent Raw (before processing, shape: {teacher_latent_raw.shape}):")
+                    log_print(str(teacher_latent_raw.detach().cpu().float().numpy()))
                     log_print(f"{'='*80}\n")
 
                     print_similarity_matrices(student_latent_projected, teacher_hidden, step=1, logger=log_print)
