@@ -93,6 +93,7 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
         # === Correct device ===
         device = action_logits.device
         vocab_size = self.vocab_size
+        print("VOCAB SIZE:", vocab_size)
         num_bins = len(self.bin_centers)
 
         # === Build vocab → continuous-action mapping (vectorized) ===
