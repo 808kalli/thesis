@@ -3,111 +3,109 @@ distill.py
 
 Distillation script for OpenVLAP <-> LAPA latent alignment.
 Uses combined loss strategy:
-    1. Embedding distillation: Direct alignment of latent action representations
+    1. Embedding distillation: Direct alignment of latent action representations  
     2. Contrastive distillation: Preserves similarity structure across batch
 
 Key approach:
     - Teacher (LAPA): 4 latent action token IDs from 8-word vocab
-    - Student (OpenVLA): 7 continuous action values (bin centers from 256-word vocab)
-    - MLP on student side: Projects 7D student actions to 4D teacher latent space
+    - Student (OpenVLAP): Uses OpenVLA-7B weights + custom distillation projection (7D -> 4D)  
     - Loss combines embedding alignment + contrastive similarity
+    - LoRA fine-tuning for memory efficiency
 
-Note: We distill latent action representations, not hidden states.
-      This makes more sense given the different action spaces.
-
-Run:
-    torchrun --standalone --nproc-per-node=8 distill.py
+Run with:
+    - [Single GPU]: python distill.py
+    - [Override Config Values]: python distill.py --batch_size 32 --learning_rate 1e-4 ...
+    - [Resume Training]: python distill.py --resume --resume_from_checkpoint <PATH/TO/CHECKPOINT/DIR>
 """
 
 import os
 import json
 import yaml
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
 import draccus
 import numpy as np
-from tqdm import tqdm
-
 import torch
 import torch.distributed as dist
+import tqdm
+from accelerate import PartialState
+from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
-from transformers import get_scheduler
+from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
+from transformers import AutoConfig, AutoImageProcessor, get_scheduler
+from PIL import Image
 
-from prismatic.conf import VLAConfig, VLARegistry
-from prismatic.models import load, load_openvlap
-from prismatic.overwatch import initialize_overwatch
-from prismatic.training import VLAMetrics
-from prismatic.util import set_global_seed
-from experiments.robot.openvla_utils import get_vlap_action
+import wandb
+from prismatic.extern.hf.configuration_prismatic import OpenVLAPConfig
+from prismatic.extern.hf.modeling_prismatic import OpenVLAPForActionPrediction
+from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+from prismatic.vla.action_tokenizer import ActionTokenizer
 
-
-# ============================================================
-# INITIAL SETUP
-# ============================================================
-
+# Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-overwatch = initialize_overwatch(__name__)
 
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
 
 @dataclass
 class DistillConfig:
-    """Configuration for OpenVLAP distillation."""
+    # fmt: off
+    vla_path: str = "openvla/openvla-7b"                            # Path to OpenVLA model (on HuggingFace Hub)
 
-    vla: VLAConfig = field(
-        default_factory=VLAConfig.get_choice_class(
-            VLARegistry.DINOSIGLIP_224PX_MX_OXE_MAGIC_SOUP_PLUS.vla_id
-        )
-    )
+    # Directory Paths
+    teacher_latent_dir: Path = Path("/root/thesis/lapa_latents")    # Path to LAPA latent directory
+    run_root_dir: Path = Path("runs")                               # Path to directory to store logs & checkpoints
+    adapter_tmp_dir: Path = Path("adapter-tmp")                     # Temporary directory for LoRA weights before fusing
 
-    teacher_latent_dir: Path = Path("/root/thesis/lapa_latents")
-    pretrained_checkpoint: Optional[Path] = None
-    run_root_dir: Path = Path("runs")
-    run_id: Optional[str] = None
+    # Distillation Parameters
+    batch_size: int = 64                                            # Distillation batch size
+    max_steps: int = 50_000                                         # Max number of distillation steps
+    save_steps: int = 2000                                          # Interval for checkpoint saving
+    learning_rate: float = 1e-4                                     # Distillation learning rate
+    grad_accumulation_steps: int = 1                                # Gradient accumulation steps
+    save_latest_checkpoint_only: bool = True                        # Whether to save only one checkpoint per run
 
-    seed: int = 7
-    save_interval: int = 2000
-    distill_loss_type: str = "mse"
-    distill_loss_weight: float = 0.5
-    contrastive_loss_weight: float = 1.0
-    contrastive_loss_type: str = "kl_divergence"    # "similarity_structure": MSE of similarity matrices (student-student vs teacher-teacher)
-                                                          # "kl_divergence": KL divergence of similarity matrices (student-student vs teacher-teacher)
-                                                          # "contrastive": contrastive loss (student[i] vs teacher[i])
-    align_dim: int = 4
-    align_hidden_dim: int = 64     #hidden projection dimentioni to grasp complex relationships between the 2 latent action spaces (7 → 64 → 4)
+    # Distillation Loss Parameters
+    distill_loss_type: str = "mse"                                  # "mse" or "cosine"
+    distill_loss_weight: float = 0.5                                # Weight for embedding distillation loss
+    contrastive_loss_weight: float = 1.0                            # Weight for contrastive loss
+    contrastive_loss_type: str = "kl_divergence"                    # "similarity_structure", "kl_divergence", or "contrastive"
+    align_dim: int = 4                                               # LAPA's latent action dimension
+    align_hidden_dim: int = 64                                       # Hidden projection dimension (7 → 64 → 4)
 
-    # --- training regime parameters ---
-    freeze_vision_backbone: bool = False      # Freeze Vision Backbone Parameters
-    freeze_llm_backbone: bool = False         # Freeze LLM Backbone parameters
-    unfreeze_last_llm_layer: bool = False     # Unfreeze final layer of LLM (only takes effect if LLM is frozen)
+    # Training Parameters - 🎯 FREEZING CONTROL POINT (finetune.py style)
+    train_projection_only: bool = False                             # If True, only train distillation projection (freeze all model params)
 
-    # --- new additions ---
-    lr_scheduler_type: str = "cosine"
-    warmup_ratio: float = 0.03
+    # LoRA Arguments
+    use_lora: bool = True                                            # Whether to use LoRA fine-tuning
+    lora_rank: int = 32                                              # Rank of LoRA weight matrix
+    lora_dropout: float = 0.0                                        # Dropout applied to LoRA weights
+    use_quantization: bool = False                                   # Whether to 4-bit quantize VLA for LoRA fine-tuning
 
-    trackers: Tuple[str, ...] = ("jsonl", "wandb")
-    wandb_project: str = "openvla-distillation"
-    wandb_entity: str = "eliaskallioras"
+    # Scheduler Parameters
+    lr_scheduler_type: str = "cosine"                                # Learning rate scheduler type
+    warmup_ratio: float = 0.03                                      # Warmup ratio
+    weight_decay: float = 1e-4                                       # Weight decay
+    max_grad_norm: float = 1.0                                       # Max gradient norm for clipping
 
-    hf_token: Union[str, Path] = Path(".hf_token")
+    # Checkpoint Resumption
+    resume: bool = False                                             # Whether to resume from checkpoint
+    resume_from_checkpoint: Optional[Path] = None                    # Specific checkpoint path to resume from
 
-    def __post_init__(self):
-        """Expose optimizer params and training constants."""
-        self.epochs = self.vla.epochs
-        self.learning_rate = self.vla.learning_rate
-        self.weight_decay = self.vla.weight_decay
-        self.max_grad_norm = self.vla.max_grad_norm
-        self.enable_mixed_precision_training = self.vla.enable_mixed_precision_training
+    # Tracking Parameters
+    wandb_project: str = "openvla-distillation"                     # Name of W&B project to log to
+    wandb_entity: str = "eliaskallioras"                            # Name of entity to log under
+    run_id_note: Optional[str] = None                               # Extra note for logging, Weights & Biases
 
+    # Other Parameters
+    seed: int = 7                                                   # Random seed
+    hf_token: Union[str, Path] = Path(".hf_token")                  # Environment variable or Path to HF Token
 
-# ============================================================
-# DATASET
-# ============================================================
+    # fmt: on
+
 
 class VLADistillDataset(Dataset):
     """
@@ -154,7 +152,7 @@ class VLADistillDataset(Dataset):
 
 
 # ============================================================
-# DISTILLATION LOSS
+# DISTILLATION LOSS FUNCTIONS
 # ============================================================
 
 def compute_similarity_matrix(embeddings: torch.Tensor) -> torch.Tensor:
@@ -359,99 +357,206 @@ def combined_distill_loss(
     return total_loss, loss_dict
 
 
-# ============================================================
-# MAIN DISTILLATION FUNCTION
-# ============================================================
+def save_checkpoint(
+    vla,
+    optimizer,
+    scheduler,
+    gradient_step_idx,
+    batch_idx,
+    checkpoint_dir,
+    processor,
+    cfg,
+    distributed_state,
+    adapter_dir=None,
+):
+    """Save complete training state for resumption."""
+    if distributed_state.is_main_process:
+        print(f"Saving Model Checkpoint for Step {gradient_step_idx}")
+
+        # Save processor
+        processor.save_pretrained(checkpoint_dir)
+
+        # If LoRA, save adapter weights to temporary directory
+        save_dir = adapter_dir if cfg.use_lora else checkpoint_dir
+        vla.module.save_pretrained(save_dir)
+
+        # Save training state
+        training_state = {
+            'gradient_step_idx': gradient_step_idx,
+            'batch_idx': batch_idx,
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'rng_state': torch.get_rng_state(),
+            'cuda_rng_state': [state.cpu() for state in torch.cuda.get_rng_state_all()],  # Move to CPU
+        }
+        torch.save(training_state, checkpoint_dir / "training_state.pt")
+
+    # Wait for main process to finish saving
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        dist.barrier()
+
+    # Merge LoRA weights into model backbone if using LoRA
+    if cfg.use_lora:
+        vla = AutoModelForVision2Seq.from_pretrained(
+            cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
+        )
+        merged_vla = PeftModel.from_pretrained(vla, adapter_dir)
+        merged_vla = merged_vla.merge_and_unload()
+        
+        if distributed_state.is_main_process:
+            merged_vla.save_pretrained(checkpoint_dir)
+            print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {checkpoint_dir}")
+
+    # Block on main process checkpointing
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        dist.barrier()
+
+
+def load_checkpoint(checkpoint_dir, optimizer, scheduler, device_id, distributed_state):
+    """Load complete training state for resumption."""
+    training_state_path = checkpoint_dir / "training_state.pt"
+    
+    if not training_state_path.exists():
+        if distributed_state.is_main_process:
+            print(f"No training state found at {training_state_path}")
+        return None
+    
+    if distributed_state.is_main_process:
+        print(f"Loading training state from {training_state_path}")
+    
+    training_state = torch.load(training_state_path, map_location='cpu')  # Load to CPU first
+    
+    # Restore optimizer state
+    optimizer.load_state_dict(training_state['optimizer_state_dict'])
+    
+    # Restore scheduler state
+    scheduler.load_state_dict(training_state['scheduler_state_dict'])
+    
+    # Restore RNG states
+    torch.set_rng_state(training_state['rng_state'])
+    
+    # Restore CUDA RNG states - ensure they're ByteTensors
+    cuda_rng_states = training_state['cuda_rng_state']
+    if isinstance(cuda_rng_states, list):
+        # Convert to ByteTensor if needed and move to appropriate device
+        cuda_rng_states = [state.to(torch.uint8) if state.dtype != torch.uint8 else state 
+                          for state in cuda_rng_states]
+        torch.cuda.set_rng_state_all(cuda_rng_states)
+    
+    if distributed_state.is_main_process:
+        print(f"Resumed from gradient step {training_state['gradient_step_idx']}, batch {training_state['batch_idx']}")
+    
+    return training_state
+
 
 @draccus.wrap()
 def distill(cfg: DistillConfig) -> None:
-    overwatch.info('"Do or do not; there is no try."', ctx_level=1)
+    print("\n" + "="*70)
+    print("\033[91m" + " "*15 + "Do or do not; there is no try." + "\033[0m")
+    print("="*70 + "\n")
 
-    # ------------------------------------------------------------
-    # Setup
-    # ------------------------------------------------------------
-    torch.cuda.set_device(device_id := overwatch.local_rank())
+    print(f"Distilling OpenVLAP Model using LAPA teacher latents")
+    print(f"Base model: {cfg.vla_path}")
+
+    # [Validate] Ensure GPU Available & Set Device / Distributed Context
+    assert torch.cuda.is_available(), "Distillation assumes at least one GPU is available!"
+    distributed_state = PartialState()
+    torch.cuda.set_device(device_id := distributed_state.local_process_index)
     torch.cuda.empty_cache()
-    set_global_seed(cfg.seed)
 
-    cfg.run_id = cfg.run_id or f"openvla-distill-x{cfg.seed}"
-    run_dir = cfg.run_root_dir / cfg.run_id
-    os.makedirs(run_dir / "checkpoints", exist_ok=True)
+    # Set random seed
+    torch.manual_seed(cfg.seed)
+    np.random.seed(cfg.seed)
 
-    if overwatch.is_rank_zero():
-        draccus.dump(cfg, open(run_dir / "config.yaml", "w"))
-        with open(run_dir / "config.yaml", "r") as f_yaml, open(run_dir / "config.json", "w") as f_json:
-            json.dump(yaml.safe_load(f_yaml), f_json, indent=2)
+    # Configure Unique Experiment ID & Log Directory
+    exp_id = f"openvlap-distill-b{cfg.batch_size}-lr{cfg.learning_rate}"
+    if cfg.use_lora:
+        exp_id += f"-lora-r{cfg.lora_rank}"
+    if cfg.train_projection_only:
+        exp_id += "-proj-only"
+    if cfg.run_id_note is not None:
+        exp_id += f"--{cfg.run_id_note}"
 
-    hf_token = cfg.hf_token.read_text().strip() if isinstance(cfg.hf_token, Path) else os.environ[cfg.hf_token]
+    # Start =>> Build Directories
+    run_dir, adapter_dir = cfg.run_root_dir / exp_id, cfg.adapter_tmp_dir / exp_id
+    os.makedirs(run_dir, exist_ok=True)
 
-    # ------------------------------------------------------------
-    # Load student model with distillation projection
-    # ------------------------------------------------------------
-    # Load with distillation projection: 7D student actions -> 4D teacher latent
-    vlm = (
-        load_openvlap(
-            cfg.pretrained_checkpoint,
-            hf_token=hf_token,
-            load_for_training=True,
-            distill_projection_dim=cfg.align_dim,  # LAPA's latent action dim (4)
-            distill_projection_hidden_dim=cfg.align_hidden_dim,
+    # Initialize Logging =>> W&B
+    if distributed_state.is_main_process:
+        wandb_id = f"distill+{exp_id}"
+        wandb.init(
+            entity=cfg.wandb_entity, 
+            project=cfg.wandb_project, 
+            name=wandb_id,
+            id=None,
+            resume=None,
         )
-        if cfg.pretrained_checkpoint
-        else load(cfg.vla.base_vlm, hf_token=hf_token, load_for_training=True)
-    )
-    vlm.train()
-    overwatch.info("Loaded OpenVLAP student with distillation projection (7 -> 4) ✅")
 
-    # Determine training "stage" based on frozen vs unfrozen parameters --> supports different fine-tuning schemes!
-    if not cfg.freeze_vision_backbone and not cfg.freeze_llm_backbone:
-        stage = "vla-full-train"  # Full fine-tuning
-    elif cfg.freeze_vision_backbone and not cfg.freeze_llm_backbone:
-        stage = "vla-train"  # Frozen vision encoder
-    elif not cfg.freeze_vision_backbone and cfg.freeze_llm_backbone:
-        assert cfg.unfreeze_last_llm_layer, "You should unfreeze at least the last layer of your LLM!"
-        stage = "vla-sandwich-train"  # Fine-tuning vision encoder, projector, and LLM last layer
-    elif cfg.freeze_vision_backbone and cfg.freeze_llm_backbone:
-        assert cfg.unfreeze_last_llm_layer, "Need to unfreeze at least last LLM layer to train!"
-        stage = "vla-last-layer-train"  # Fine-tuning LLM last layer only
+    # Determine checkpoint directory for resumption
+    checkpoint_dir = cfg.resume_from_checkpoint if cfg.resume_from_checkpoint is not None else run_dir
+
+    # Quantization Config =>> only if LoRA fine-tuning
+    quantization_config = None
+    if cfg.use_quantization:
+        assert cfg.use_lora, "Quantized training only supported for LoRA fine-tuning!"
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4"
+        )
+
+    # Register OpenVLA model to HF Auto Classes (not needed if the model is on HF Hub)
+    AutoConfig.register("openvlap", OpenVLAPConfig)
+    AutoImageProcessor.register(OpenVLAPConfig, PrismaticImageProcessor)
+    AutoProcessor.register(OpenVLAPConfig, PrismaticProcessor)
+    AutoModelForVision2Seq.register(OpenVLAPConfig, OpenVLAPForActionPrediction)
+
+    # Load OpenVLA Processor and Model using HF AutoClasses, then convert to OpenVLAP
+    # If resuming, load from checkpoint; otherwise load from original model
+    model_path = checkpoint_dir if cfg.resume else cfg.vla_path
+    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    
+    vla = AutoModelForVision2Seq.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        quantization_config=quantization_config,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True,
+    )
+
+    # Device Placement =>> note that BitsAndBytes automatically handles for quantized training
+    if cfg.use_quantization:
+        vla = prepare_model_for_kbit_training(vla)
     else:
-        raise ValueError(
-            "Weight freezing configuration not supported. Distill config has the following parameters: "
-            f"freeze_vision_backbone: {cfg.freeze_vision_backbone}, "
-            f"freeze_llm_backbone: {cfg.freeze_llm_backbone}, "
-            f"unfreeze_last_llm_layer: {cfg.unfreeze_last_llm_layer}"
+        vla = vla.to(device_id)
+
+    # 🎯 FREEZING CONTROL POINT - finetune.py style with LoRA
+    print(f"   train_projection_only: {cfg.train_projection_only}")
+    print(f"   use_lora: {cfg.use_lora}")
+    
+    if cfg.use_lora:
+        lora_config = LoraConfig(
+            r=cfg.lora_rank,
+            lora_alpha=min(cfg.lora_rank, 16),
+            lora_dropout=cfg.lora_dropout,
+            target_modules="all-linear",
+            init_lora_weights="gaussian",
         )
+        vla = get_peft_model(vla, lora_config)
+        vla.print_trainable_parameters()
 
-    # [Explicit] Call to `freeze_backbones` here for clarity =>> will log exactly what is/is not frozen
-    overwatch.info(f"Distillation Training Stage => `{stage}`")
-    vlm.freeze_backbones(
-        freeze_vision_backbone=cfg.freeze_vision_backbone,
-        freeze_llm_backbone=cfg.freeze_llm_backbone,
-        unfreeze_last_llm_layer=cfg.unfreeze_last_llm_layer,
-    )
+    for param in vla.distill_projection.parameters():
+        param.requires_grad = True
+    for param in vla.distill_norm.parameters():
+        param.requires_grad = True
 
-    # ------------------------------------------------------------
-    # Dataset & Dataloader
-    # ------------------------------------------------------------
-    dataset = VLADistillDataset(cfg.teacher_latent_dir)
-    # Batch size > 1 required for contrastive loss to work
-    # Adjust based on GPU memory (16 is reasonable for 40GB GPU)
-    batch_size = 64
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    overwatch.info(
-        f"Loaded {len(dataset)} distillation samples with batch_size={batch_size}\n"
-        f"Expected teacher latent shape: [4] (LAPA's 4 latent action tokens)\n"
-        f"Expected student action shape: [7] (OpenVLA's 7 continuous actions)"
-    )
+    # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
+    vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
 
-    # ------------------------------------------------------------
-    # Optimizer / Scheduler / Metrics
-    # ------------------------------------------------------------
-    # Optimizer now includes distill_projection parameters (already part of vlm.parameters())
-    trainable_params = list(vlm.parameters())
-    optimizer = torch.optim.AdamW(trainable_params, lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
-
-    total_steps = cfg.epochs * len(dataloader)
+    # Create Optimizer
+    trainable_params = [param for param in vla.parameters() if param.requires_grad]
+    optimizer = AdamW(trainable_params, lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
+    
+    # Create Learning Rate Scheduler
+    total_steps = cfg.max_steps
     warmup_steps = int(cfg.warmup_ratio * total_steps)
     scheduler = get_scheduler(
         cfg.lr_scheduler_type,
@@ -460,141 +565,147 @@ def distill(cfg: DistillConfig) -> None:
         num_training_steps=total_steps,
     )
 
-    metrics = VLAMetrics(
-        cfg.trackers,
-        cfg.run_id,
-        run_dir,
-        draccus.encode(cfg),
-        wandb_project=cfg.wandb_project,
-        wandb_entity=cfg.wandb_entity,
+    # Load Distillation Dataset
+    dataset = VLADistillDataset(cfg.teacher_latent_dir)
+
+    # Create DataLoader
+    dataloader = DataLoader(
+        dataset,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        num_workers=0,
     )
 
-    processor = vlm.vision_backbone.image_transform
-    base_vla_name = cfg.vla.base_vlm
-    global_step = 0
+    print(f"Loaded {len(dataset)} distillation samples with batch_size={cfg.batch_size}")
 
-    # ------------------------------------------------------------
-    # Training Loop
-    # ------------------------------------------------------------
-    for epoch in range(cfg.epochs):
-        with tqdm(dataloader, desc=f"Epoch {epoch+1}", disable=not overwatch.is_rank_zero()) as progress:
-            for step, batch in enumerate(dataloader):
+    # Deque to store recent train metrics
+    recent_losses = deque(maxlen=1)
+    recent_embed_losses = deque(maxlen=1)
+    recent_contrast_losses = deque(maxlen=1)
+
+    # Train!
+    with tqdm.tqdm(total=cfg.max_steps, leave=False) as progress:
+        vla.train()
+        optimizer.zero_grad()
+
+        for batch_idx, batch in enumerate(dataloader):
+            
+            with torch.autocast("cuda", dtype=torch.bfloat16):
                 # Prepare batch data
                 images = batch["image"].to(device_id)  # [batch, C, H, W]
                 prompts = batch["prompt"]  # List of strings
                 teacher_hidden = batch["teacher_latent"].to(device_id)  # [batch, 4]
                 teacher_hidden = (teacher_hidden / 7.0) * 2.0 - 1.0  # normalize to [-1, 1]
 
-                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=cfg.enable_mixed_precision_training):
-                    # ========================================
-                    # STUDENT FORWARD PASS - Get Projected Latent Actions
-                    # ========================================
-                    # get_vla_action -> predict_action already applies distill_projection
-                    # Returns [4] projected actions (7D -> 4D via integrated MLP)
+                # ========================================
+                # STUDENT FORWARD PASS - Get Projected Latent Actions via OpenVLAP
+                # ========================================
+                student_latent_list = []
+                for i in range(len(prompts)):
+                    # Convert tensor image back to PIL Image for OpenVLAP
+                    rgb_tensor = images[i]  # [C, H, W] in range [0, 1]
+                    rgb_pil = Image.fromarray((rgb_tensor.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8))
+                    
+                    # Use OpenVLAP's predict_action which returns projected 4D actions directly
+                    projected_action = vla.module.predict_action(rgb_pil, prompts[i])
+                    
+                    if not isinstance(projected_action, torch.Tensor):
+                        projected_action = torch.tensor(projected_action).to(device_id).float()
+                    
+                    student_latent_list.append(projected_action)
 
-                    student_latent_list = []
-                    for i in range(len(prompts)):
-                        rgb = images[i].permute(1, 2, 0).cpu().numpy().astype(np.uint8)
-                        obs = {"full_image": rgb}
+                student_latent_projected = torch.stack(student_latent_list)  # [batch, 4]
 
-                        # get_vla_action calls predict_action which now returns projected 4D tensor
-                        projected_action = get_vlap_action(
-                            vlm,
-                            processor,
-                            base_vla_name,
-                            obs,
-                            prompts[i],
-                            center_crop=False,
-                        )
-                        student_latent_list.append(projected_action if isinstance(projected_action, torch.Tensor) else torch.tensor(projected_action).to(device_id).float())
-
-                    student_latent_projected = torch.stack(student_latent_list)  # [batch, 4]
-
-                    # ========================================
-                    # APPLY NON-LEARNABLE LAYER NORMALIZATION TO TEACHER LATENT
-                    # ========================================
-                    teacher_hidden = torch.nn.functional.layer_norm(
-                        teacher_hidden,
-                        normalized_shape=(teacher_hidden.shape[-1],),
-                        weight=None,  # No learnable affine parameters
-                        bias=None,    # No learnable affine parameters
-                        eps=1e-6
-                    )
-
-                    # ========================================
-                    # COMPUTE COMBINED LOSS
-                    # ========================================
-                    loss, loss_dict = combined_distill_loss(
-                        z_s=student_latent_projected,  # [batch, 4] - projected student actions
-                        z_t=teacher_hidden,             # [batch, 4] - teacher latent tokens
-                        embedding_weight=cfg.distill_loss_weight,
-                        contrastive_weight=cfg.contrastive_loss_weight,
-                        loss_type=cfg.distill_loss_type,
-                        contrastive_type=cfg.contrastive_loss_type
-                    )
-
-                # --- backward pass and optimizer step ---
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(vlm.parameters(), cfg.max_grad_norm)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
-                global_step += 1
-
-                # Save checkpoint every save_interval steps
-                if overwatch.is_rank_zero() and (global_step % cfg.save_interval == 0):
-                    ckpt_path = run_dir / "checkpoints" / f"step_{global_step}.pt"
-                    torch.save(
-                        {
-                            "model": vlm.state_dict(),  # Includes distill_projection
-                            "optimizer": optimizer.state_dict(),
-                            "scheduler": scheduler.state_dict(),
-                            "epoch": epoch,
-                            "step": global_step,
-                        },
-                        ckpt_path,
-                    )
-                    overwatch.info(f"Saved checkpoint at {ckpt_path}")
-
-                # --- metrics ---
-                metrics.commit(
-                    loss=loss_dict["total_loss"],
-                    embed_loss=loss_dict["embed_loss"],
-                    contrast_loss=loss_dict["contrast_loss"],
-                    lr=scheduler.get_last_lr()[0]
+                # ========================================
+                # APPLY NON-LEARNABLE LAYER NORMALIZATION TO TEACHER LATENT
+                # ========================================
+                teacher_hidden = torch.nn.functional.layer_norm(
+                    teacher_hidden,
+                    normalized_shape=(teacher_hidden.shape[-1],),
+                    weight=None,  # No learnable affine parameters
+                    bias=None,    # No learnable affine parameters
+                    eps=1e-6
                 )
 
-                if overwatch.is_rank_zero():
-                    postfix = {
-                        "total": f"{loss_dict['total_loss']:.4f}",
-                        "embed": f"{loss_dict['embed_loss']:.4f}",
-                        "contr": f"{loss_dict['contrast_loss']:.4f}",
-                        "lr": f"{scheduler.get_last_lr()[0]:.2e}"
-                    }
-                    progress.set_postfix(postfix)
+                # ========================================
+                # COMPUTE COMBINED LOSS
+                # ========================================
+                loss, loss_dict = combined_distill_loss(
+                    z_s=student_latent_projected,  # [batch, 4] - projected student actions
+                    z_t=teacher_hidden,             # [batch, 4] - teacher latent tokens
+                    embedding_weight=cfg.distill_loss_weight,
+                    contrastive_weight=cfg.contrastive_loss_weight,
+                    loss_type=cfg.distill_loss_type,
+                    contrastive_type=cfg.contrastive_loss_type
+                )
 
-        # Save checkpoint per epoch
-        if overwatch.is_rank_zero():
-            ckpt_path = run_dir / "checkpoints" / f"epoch_{epoch+1}.pt"
-            torch.save(
-                {
-                    "model": vlm.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "scheduler": scheduler.state_dict(),
-                    "epoch": epoch,
-                },
-                ckpt_path,
-            )
-            overwatch.info(f"Saved checkpoint at {ckpt_path}")
+            # Backward pass
+            loss.backward()
 
-    # ------------------------------------------------------------
-    # Finalize
-    # ------------------------------------------------------------
-    metrics.finalize()
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        dist.barrier()
-        dist.destroy_process_group()
-    overwatch.info("Distillation Complete ✅")
+            # Optimizer Step
+            torch.nn.utils.clip_grad_norm_(vla.parameters(), cfg.max_grad_norm)
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+            progress.update()
+
+            # Store train metrics
+            recent_losses.append(loss.item())
+            recent_embed_losses.append(loss_dict["embed_loss"])
+            recent_contrast_losses.append(loss_dict["contrast_loss"])
+
+            # Gradient step index (1:1 with batch index now)
+            gradient_step_idx = batch_idx + 1
+
+            # Compute train metrics
+            smoothened_loss = recent_losses[0]
+            smoothened_embed_loss = recent_embed_losses[0]
+            smoothened_contrast_loss = recent_contrast_losses[0]
+
+            # Push Metrics to W&B (every 10 gradient steps)
+            if distributed_state.is_main_process and gradient_step_idx % 10 == 0:
+                wandb.log(
+                    {
+                        "total_loss": smoothened_loss,
+                        "embed_loss": smoothened_embed_loss,
+                        "contrast_loss": smoothened_contrast_loss,
+                        "learning_rate": scheduler.get_last_lr()[0],
+                    },
+                    step=gradient_step_idx,
+                )
+
+            # Save Model Checkpoint
+            if gradient_step_idx > 0 and gradient_step_idx % cfg.save_steps == 0:
+                if cfg.save_latest_checkpoint_only:
+                    # Overwrite latest checkpoint
+                    save_checkpoint(
+                        vla, optimizer, scheduler, gradient_step_idx, batch_idx,
+                        run_dir, processor, cfg,
+                        distributed_state, adapter_dir if cfg.use_lora else None
+                    )
+                else:
+                    # Save checkpoint in new directory
+                    checkpoint_dir_step = Path(str(run_dir) + f"--{gradient_step_idx}_chkpt")
+                    os.makedirs(checkpoint_dir_step, exist_ok=True)
+                    
+                    adapter_dir_step = Path(str(adapter_dir) + f"--{gradient_step_idx}_chkpt") if cfg.use_lora else None
+                    if adapter_dir_step:
+                        os.makedirs(adapter_dir_step, exist_ok=True)
+                    
+                    save_checkpoint(
+                        vla, optimizer, scheduler, gradient_step_idx, batch_idx,
+                        checkpoint_dir_step, processor, cfg,
+                        distributed_state, adapter_dir_step
+                    )
+
+            # Stop training when max_steps is reached
+            if gradient_step_idx >= cfg.max_steps:
+                print(f"Max step {cfg.max_steps} reached! Stopping training...")
+                break
+
+    print("Distillation Complete ✅")
+    if distributed_state.is_main_process:
+        wandb.finish()
 
 
 if __name__ == "__main__":

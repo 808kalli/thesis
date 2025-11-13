@@ -138,3 +138,22 @@ class OpenVLAConfig(PrismaticConfig):
         self.norm_stats, self.n_action_bins = norm_stats, n_action_bins
 
         super().__init__(**kwargs)
+
+
+class OpenVLAPConfig(PrismaticConfig):
+    model_type: str = "openvlap"
+
+    def __init__(
+        self,
+        # Distillation-specific parameters
+        distill_projection_dim: int = 4,
+        distill_projection_hidden_dim: int = 64,
+        action_dim: int = 7,
+        **kwargs: str,
+    ) -> None:
+        # Distillation parameters
+        self.distill_projection_dim = distill_projection_dim
+        self.distill_projection_hidden_dim = distill_projection_hidden_dim
+        self.action_dim = action_dim
+
+        super().__init__(**kwargs)

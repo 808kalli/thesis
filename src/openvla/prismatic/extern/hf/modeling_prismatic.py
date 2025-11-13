@@ -27,7 +27,7 @@ from timm.models.vision_transformer import LayerScale
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import ModelOutput
 
-from .configuration_prismatic import OpenVLAConfig, PrismaticConfig
+from .configuration_prismatic import OpenVLAConfig, OpenVLAPConfig, PrismaticConfig
 
 # Get Logger
 logger = logging.getLogger(__name__)
@@ -560,3 +560,55 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         """Get all the logged statistics for the given dataset."""
         unnorm_key = self._check_unnorm_key(self.norm_stats, unnorm_key)
         return self.norm_stats[unnorm_key]["action"]
+    
+
+
+class OpenVLAPForActionPrediction(PrismaticForConditionalGeneration):
+    config_class: PretrainedConfig = OpenVLAPConfig
+
+    def __init__(self, config: OpenVLAPConfig) -> None:
+        super().__init__(config)
+
+        # Store action_dim from config
+        self.action_dim = config.action_dim
+
+        # Optional projection layer for distillation
+        # Projects from action_dim to teacher's latent dim
+        self.distill_projection = nn.Sequential(
+            nn.Linear(self.action_dim, config.distill_projection_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(self.action_dim, config.distill_projection_dim),
+            nn.Tanh(),
+        )
+        self.distill_norm = nn.LayerNorm(
+            config.distill_projection_dim,
+            elementwise_affine=True,  # learnable γ, β
+            eps=1e-6
+        )
+
+    def predict_action(
+        self, input_ids: Optional[torch.LongTensor] = None, **kwargs: str
+    ) -> torch.Tensor:
+        """Thin wrapper around .generate() that decodes predicted actions and applies distillation projection."""
+        # If the special empty token ('') does not already appear after the colon (':') token in the prompt
+        # (after "OUT:" or "ASSISTANT:"), insert it to match the inputs seen at training time
+        if not torch.all(input_ids[:, -1] == 29871):
+            input_ids = torch.cat(
+                (input_ids, torch.unsqueeze(torch.Tensor([29871]).long(), dim=0).to(input_ids.device)), dim=1
+            )
+
+        # Run VLA inference
+        generated_ids = self.generate(input_ids, max_new_tokens=self.get_action_dim(), **kwargs)
+
+        # Extract predicted action tokens (last action_dim tokens)
+        predicted_action_token_ids = generated_ids[0, -self.get_action_dim() :].cpu().numpy()
+
+        # Apply distillation projection
+        action_tensor = torch.from_numpy(predicted_action_token_ids).to(self.device).float()
+        projected_actions = self.distill_projection(action_tensor)
+        projected_actions = self.distill_norm(projected_actions)
+
+        return projected_actions
+
+    def get_action_dim(self) -> int:
+        return self.action_dim
