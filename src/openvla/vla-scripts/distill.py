@@ -537,11 +537,11 @@ def distill(cfg: DistillConfig) -> None:
             load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4"
         )
 
-    # Register OpenVLA model to HF Auto Classes
-    AutoConfig.register("openvlap", OpenVLAPConfig)
-    AutoImageProcessor.register(OpenVLAPConfig, PrismaticImageProcessor)
-    AutoProcessor.register(OpenVLAPConfig, PrismaticProcessor)
-    AutoModelForVision2Seq.register(OpenVLAPConfig, OpenVLAPForActionPrediction)
+    # Register standard OpenVLA model (like in finetune.py)
+    AutoConfig.register("openvla", OpenVLAConfig)
+    AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
+    AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
+    AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
     # Load OpenVLA Processor and Model using HF AutoClasses
     # If resuming, load from checkpoint; otherwise load from original model
