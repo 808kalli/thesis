@@ -452,7 +452,30 @@ def save_checkpoint(
 
         # If LoRA, save adapter weights to temporary directory
         save_dir = adapter_dir if cfg.use_lora else checkpoint_dir
-        vla.module.save_pretrained(save_dir)
+
+        # Remove distillation layers before saving (only save vanilla OpenVLA weights)
+        model_to_save = vla.module
+        distill_projection = getattr(model_to_save, 'distill_projection', None)
+        distill_norm = getattr(model_to_save, 'distill_norm', None)
+        action_dim = getattr(model_to_save, 'action_dim', None)
+
+        # Temporarily remove attributes
+        if distill_projection is not None:
+            delattr(model_to_save, 'distill_projection')
+        if distill_norm is not None:
+            delattr(model_to_save, 'distill_norm')
+        if action_dim is not None:
+            delattr(model_to_save, 'action_dim')
+
+        model_to_save.save_pretrained(save_dir)
+
+        # Restore distillation layers for continued training
+        if distill_projection is not None:
+            model_to_save.distill_projection = distill_projection
+        if distill_norm is not None:
+            model_to_save.distill_norm = distill_norm
+        if action_dim is not None:
+            model_to_save.action_dim = action_dim
 
         # Save training state
         training_state = {
@@ -614,16 +637,30 @@ def distill(cfg: DistillConfig) -> None:
         vla.distill_norm = vla.distill_norm.to(device_id)
 
     # 🎯 FREEZING CONTROL POINT - finetune.py style with LoRA
-    print(f"   use_lora: {cfg.use_lora}")
+    print(f"use_lora: {cfg.use_lora}")
+
+    def get_lora_linear_targets(model):
+        target_layers = []
+        for name, module in model.named_modules():
+            if isinstance(module, nn.Linear):
+                # Skip TEMPORARY distill layers
+                if "distill_" in name:
+                    continue
+                target_layers.append(name.split(".")[-1])  # HF expects class names
+        return list(set(target_layers))
 
     if cfg.use_lora:
+        linear_targets = get_lora_linear_targets(vla)
+        print("Using LoRA on:", linear_targets)
+
         lora_config = LoraConfig(
             r=cfg.lora_rank,
             lora_alpha=min(cfg.lora_rank, 16),
             lora_dropout=cfg.lora_dropout,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],  # Only LLM layers
+            target_modules=linear_targets,
             init_lora_weights="gaussian",
         )
+
         vla = get_peft_model(vla, lora_config)
         vla.print_trainable_parameters()
 
