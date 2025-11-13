@@ -131,8 +131,8 @@ class DistillConfig:
 
     # Distillation Parameters
     batch_size: int = 64                                            # Distillation batch size
-    max_steps: int = 50_000                                         # Max number of distillation steps
-    save_steps: int = 2000                                          # Interval for checkpoint saving
+    num_epochs: int = 10                                            # Number of epochs (full passes through dataset)
+    save_every_n_epochs: int = 1                                    # Save checkpoint every N epochs
     learning_rate: float = 1e-4                                     # Distillation learning rate
     grad_accumulation_steps: int = 1                                # Gradient accumulation steps
     save_latest_checkpoint_only: bool = True                        # Whether to save only one checkpoint per run
@@ -667,22 +667,25 @@ def distill(cfg: DistillConfig) -> None:
     # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
     vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
 
+    # Load Distillation Dataset
+    dataset = VLADistillDataset(cfg.teacher_latent_dir, processor)
+
     # Create Optimizer
     trainable_params = [param for param in vla.parameters() if param.requires_grad]
     optimizer = AdamW(trainable_params, lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
-    
-    # Create Learning Rate Scheduler
-    total_steps = cfg.max_steps
+
+    # Calculate total steps based on epochs and dataset size
+    steps_per_epoch = len(dataset) // cfg.batch_size
+    total_steps = cfg.num_epochs * steps_per_epoch
     warmup_steps = int(cfg.warmup_ratio * total_steps)
+
+    # Create Learning Rate Scheduler
     scheduler = get_scheduler(
         cfg.lr_scheduler_type,
         optimizer=optimizer,
         num_warmup_steps=warmup_steps,
         num_training_steps=total_steps,
     )
-
-    # Load Distillation Dataset
-    dataset = VLADistillDataset(cfg.teacher_latent_dir, processor)
 
     def distill_collator(batch):
         # Pad input_ids
@@ -734,107 +737,100 @@ def distill(cfg: DistillConfig) -> None:
     teacher_batch_norm.eval()  # Set to eval mode for non-learnable behavior
 
     # Train!
-    with tqdm.tqdm(total=cfg.max_steps, leave=False) as progress:
+    with tqdm.tqdm(total=total_steps, leave=False) as progress:
         vla.train()
         optimizer.zero_grad()
+        global_step = 0
 
-        for batch_idx, batch in enumerate(dataloader):
-            
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                
-                student_latent_projected = vla.module.get_projected_actions_from_batch(
-                    input_ids=batch["input_ids"].to(device_id),
-                    attention_mask=batch["attention_mask"].to(device_id),
-                    pixel_values=batch["pixel_values"].to(device_id),
-                )
+        for epoch in range(cfg.num_epochs):
+            for batch_idx, batch in enumerate(dataloader):
 
-                teacher_hidden = batch["teacher_latent"].to(device_id)  # [batch, 4]
+                with torch.autocast("cuda", dtype=torch.bfloat16):
 
-                # Save raw teacher latents for logging before processing
-                teacher_latent_raw = teacher_hidden.clone()
+                    student_latent_projected = vla.module.get_projected_actions_from_batch(
+                        input_ids=batch["input_ids"].to(device_id),
+                        attention_mask=batch["attention_mask"].to(device_id),
+                        pixel_values=batch["pixel_values"].to(device_id),
+                    )
 
-                teacher_hidden = (teacher_hidden / 7.0) * 2.0 - 1.0  # normalize to [-1, 1]
-                # ========================================
-                # APPLY NON-LEARNABLE BATCH NORMALIZATION TO TEACHER LATENT
-                # ========================================
-                teacher_hidden = teacher_batch_norm(teacher_hidden)
+                    teacher_hidden = batch["teacher_latent"].to(device_id)  # [batch, 4]
 
-                # ========================================
-                # COMPUTE COMBINED LOSS
-                # ========================================
+                    teacher_hidden = (teacher_hidden / 7.0) * 2.0 - 1.0  # normalize to [-1, 1]
+                    # ========================================
+                    # APPLY NON-LEARNABLE BATCH NORMALIZATION TO TEACHER LATENT
+                    # ========================================
+                    teacher_hidden = teacher_batch_norm(teacher_hidden)
 
-                loss, loss_dict = combined_distill_loss(
-                    z_s=student_latent_projected,  # [batch, 4] - projected student actions
-                    z_t=teacher_hidden,             # [batch, 4] - teacher latent tokens
-                    embedding_weight=cfg.distill_loss_weight,
-                    contrastive_weight=cfg.contrastive_loss_weight,
-                    loss_type=cfg.distill_loss_type,
-                    contrastive_type=cfg.contrastive_loss_type
-                )
+                    # ========================================
+                    # COMPUTE COMBINED LOSS
+                    # ========================================
 
-            # Backward pass
-            loss.backward()
+                    loss, loss_dict = combined_distill_loss(
+                        z_s=student_latent_projected,  # [batch, 4] - projected student actions
+                        z_t=teacher_hidden,             # [batch, 4] - teacher latent tokens
+                        embedding_weight=cfg.distill_loss_weight,
+                        contrastive_weight=cfg.contrastive_loss_weight,
+                        loss_type=cfg.distill_loss_type,
+                        contrastive_type=cfg.contrastive_loss_type
+                    )
 
-            # Optimizer Step
-            torch.nn.utils.clip_grad_norm_(vla.parameters(), cfg.max_grad_norm)
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
-            progress.update()
+                # Backward pass
+                loss.backward()
 
-            # Store train metrics
-            recent_losses.append(loss.item())
-            recent_embed_losses.append(loss_dict["embed_loss"])
-            recent_contrast_losses.append(loss_dict["contrast_loss"])
+                # Optimizer Step
+                torch.nn.utils.clip_grad_norm_(vla.parameters(), cfg.max_grad_norm)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                progress.update()
 
-            # Gradient step index (1:1 with batch index now)
-            gradient_step_idx = batch_idx + 1
+                # Store train metrics
+                recent_losses.append(loss.item())
+                recent_embed_losses.append(loss_dict["embed_loss"])
+                recent_contrast_losses.append(loss_dict["contrast_loss"])
 
-            # Compute train metrics
-            smoothened_loss = recent_losses[0]
-            smoothened_embed_loss = recent_embed_losses[0]
-            smoothened_contrast_loss = recent_contrast_losses[0]
+                global_step += 1
 
-            # Push Metrics to W&B (every 10 gradient steps)
-            if distributed_state.is_main_process and gradient_step_idx % 10 == 0:
-                wandb.log(
-                    {
-                        "total_loss": smoothened_loss,
-                        "embed_loss": smoothened_embed_loss,
-                        "contrast_loss": smoothened_contrast_loss,
-                        "learning_rate": scheduler.get_last_lr()[0],
-                    },
-                    step=gradient_step_idx,
-                )
+                # Compute train metrics
+                smoothened_loss = recent_losses[0]
+                smoothened_embed_loss = recent_embed_losses[0]
+                smoothened_contrast_loss = recent_contrast_losses[0]
 
-            # Save Model Checkpoint
-            if gradient_step_idx > 0 and gradient_step_idx % cfg.save_steps == 0:
+                # Push Metrics to W&B (every 10 gradient steps)
+                if distributed_state.is_main_process and global_step % 10 == 0:
+                    wandb.log(
+                        {
+                            "total_loss": smoothened_loss,
+                            "embed_loss": smoothened_embed_loss,
+                            "contrast_loss": smoothened_contrast_loss,
+                            "learning_rate": scheduler.get_last_lr()[0],
+                        },
+                        step=global_step,
+                    )
+
+            # Save Model Checkpoint after each epoch
+            if (epoch + 1) % cfg.save_every_n_epochs == 0:
                 if cfg.save_latest_checkpoint_only:
                     # Overwrite latest checkpoint
                     save_checkpoint(
-                        vla, optimizer, scheduler, gradient_step_idx, batch_idx,
+                        vla, optimizer, scheduler, global_step, epoch,
                         run_dir, processor, cfg,
                         distributed_state, adapter_dir if cfg.use_lora else None
                     )
                 else:
                     # Save checkpoint in new directory
-                    checkpoint_dir_step = Path(str(run_dir) + f"--{gradient_step_idx}_chkpt")
-                    os.makedirs(checkpoint_dir_step, exist_ok=True)
-                    
-                    adapter_dir_step = Path(str(adapter_dir) + f"--{gradient_step_idx}_chkpt") if cfg.use_lora else None
-                    if adapter_dir_step:
-                        os.makedirs(adapter_dir_step, exist_ok=True)
-                    
-                    save_checkpoint(
-                        vla, optimizer, scheduler, gradient_step_idx, batch_idx,
-                        checkpoint_dir_step, processor, cfg,
-                        distributed_state, adapter_dir_step
-                    )
+                    checkpoint_dir_epoch = Path(str(run_dir) + f"--epoch{epoch+1}_chkpt")
+                    os.makedirs(checkpoint_dir_epoch, exist_ok=True)
 
-            # Stop training when max_steps is reached
-            if gradient_step_idx >= cfg.max_steps:
-                print(f"Max step {cfg.max_steps} reached! Stopping training...")
-                break
+                    adapter_dir_epoch = Path(str(adapter_dir) + f"--epoch{epoch+1}_chkpt") if cfg.use_lora else None
+                    if adapter_dir_epoch:
+                        os.makedirs(adapter_dir_epoch, exist_ok=True)
+
+                    save_checkpoint(
+                        vla, optimizer, scheduler, global_step, epoch,
+                        checkpoint_dir_epoch, processor, cfg,
+                        distributed_state, adapter_dir_epoch
+                    )
 
     print("Distillation Complete ✅")
     if distributed_state.is_main_process:
