@@ -73,13 +73,18 @@ class DistillConfig:
     seed: int = 7
     save_interval: int = 2000
     distill_loss_type: str = "mse"
-    distill_loss_weight: float = 1.0
-    contrastive_loss_weight: float = 0.5
-    contrastive_loss_type: str = "contrastive"    # "similarity_structure": MSE of similarity matrices (student-student vs teacher-teacher)
+    distill_loss_weight: float = 0.5
+    contrastive_loss_weight: float = 1.0
+    contrastive_loss_type: str = "kl_divergence"    # "similarity_structure": MSE of similarity matrices (student-student vs teacher-teacher)
                                                           # "kl_divergence": KL divergence of similarity matrices (student-student vs teacher-teacher)
                                                           # "contrastive": contrastive loss (student[i] vs teacher[i])
     align_dim: int = 4
     align_hidden_dim: int = 64     #hidden projection dimentioni to grasp complex relationships between the 2 latent action spaces (7 → 64 → 4)
+
+    # --- training regime parameters ---
+    freeze_vision_backbone: bool = False      # Freeze Vision Backbone Parameters
+    freeze_llm_backbone: bool = False         # Freeze LLM Backbone parameters
+    unfreeze_last_llm_layer: bool = False     # Unfreeze final layer of LLM (only takes effect if LLM is frozen)
 
     # --- new additions ---
     lr_scheduler_type: str = "cosine"
@@ -397,6 +402,33 @@ def distill(cfg: DistillConfig) -> None:
     )
     vlm.train()
     overwatch.info("Loaded OpenVLAP student with distillation projection (7 -> 4) ✅")
+
+    # Determine training "stage" based on frozen vs unfrozen parameters --> supports different fine-tuning schemes!
+    if not cfg.freeze_vision_backbone and not cfg.freeze_llm_backbone:
+        stage = "vla-full-train"  # Full fine-tuning
+    elif cfg.freeze_vision_backbone and not cfg.freeze_llm_backbone:
+        stage = "vla-train"  # Frozen vision encoder
+    elif not cfg.freeze_vision_backbone and cfg.freeze_llm_backbone:
+        assert cfg.unfreeze_last_llm_layer, "You should unfreeze at least the last layer of your LLM!"
+        stage = "vla-sandwich-train"  # Fine-tuning vision encoder, projector, and LLM last layer
+    elif cfg.freeze_vision_backbone and cfg.freeze_llm_backbone:
+        assert cfg.unfreeze_last_llm_layer, "Need to unfreeze at least last LLM layer to train!"
+        stage = "vla-last-layer-train"  # Fine-tuning LLM last layer only
+    else:
+        raise ValueError(
+            "Weight freezing configuration not supported. Distill config has the following parameters: "
+            f"freeze_vision_backbone: {cfg.freeze_vision_backbone}, "
+            f"freeze_llm_backbone: {cfg.freeze_llm_backbone}, "
+            f"unfreeze_last_llm_layer: {cfg.unfreeze_last_llm_layer}"
+        )
+
+    # [Explicit] Call to `freeze_backbones` here for clarity =>> will log exactly what is/is not frozen
+    overwatch.info(f"Distillation Training Stage => `{stage}`")
+    vlm.freeze_backbones(
+        freeze_vision_backbone=cfg.freeze_vision_backbone,
+        freeze_llm_backbone=cfg.freeze_llm_backbone,
+        unfreeze_last_llm_layer=cfg.unfreeze_last_llm_layer,
+    )
 
     # ------------------------------------------------------------
     # Dataset & Dataloader
