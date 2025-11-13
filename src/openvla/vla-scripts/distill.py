@@ -92,6 +92,9 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
         # Use the same slice as finetune.py (this should fix your shape issue)
         action_logits = output.logits[:, self.vision_backbone.featurizer.patch_embed.num_patches : -1]
         action_preds = action_logits.argmax(dim=2)
+
+        # Extract ONLY the last 7 action tokens
+        action_preds = action_preds[:, -7:]
         
         # Use the SAME conversion logic as predict_action
         normalized_actions_batch = []
