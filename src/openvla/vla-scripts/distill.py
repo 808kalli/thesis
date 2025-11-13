@@ -41,13 +41,52 @@ from transformers import AutoConfig, AutoImageProcessor, get_scheduler
 from PIL import Image
 
 import wandb
-from prismatic.extern.hf.configuration_prismatic import OpenVLAPConfig
-from prismatic.extern.hf.modeling_prismatic import OpenVLAPForActionPrediction
+import torch.nn as nn
+from prismatic.extern.hf.configuration_prismatic import OpenVLAPConfig, OpenVLAConfig
+from prismatic.extern.hf.modeling_prismatic import OpenVLAPForActionPrediction, OpenVLAForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
 from prismatic.vla.action_tokenizer import ActionTokenizer
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
+def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64, projection_dim: int = 4):
+    """
+    Adds distillation projection and normalization layers to a standard OpenVLA model.
+
+    These layers are randomly initialized and trainable.
+
+    Args:
+        vla_model: Loaded OpenVLAForActionPrediction model
+        action_dim: Dimension of action space (default: 7)
+        hidden_dim: Hidden dimension for projection MLP (default: 64)
+        projection_dim: Final projection dimension matching teacher latent dim (default: 4)
+
+    Returns:
+        Modified model with distill_projection and distill_norm layers added
+    """
+    vla_model.action_dim = action_dim
+
+    # Add distillation projection layers (randomly initialized)
+    vla_model.distill_projection = nn.Sequential(
+        nn.Linear(action_dim, hidden_dim),
+        nn.ReLU(),
+        nn.Linear(hidden_dim, projection_dim),
+        nn.Tanh(),
+    )
+
+    # Add distillation normalization layer (randomly initialized)
+    vla_model.distill_norm = nn.LayerNorm(
+        projection_dim,
+        elementwise_affine=True,  # learnable γ, β
+        eps=1e-6
+    )
+
+    # Add the get_action_dim method
+    vla_model.get_action_dim = lambda: vla_model.action_dim
+
+    return vla_model
 
 
 @dataclass
@@ -498,17 +537,17 @@ def distill(cfg: DistillConfig) -> None:
             load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4"
         )
 
-    # Register OpenVLA model to HF Auto Classes (not needed if the model is on HF Hub)
+    # Register OpenVLA model to HF Auto Classes
     AutoConfig.register("openvlap", OpenVLAPConfig)
     AutoImageProcessor.register(OpenVLAPConfig, PrismaticImageProcessor)
     AutoProcessor.register(OpenVLAPConfig, PrismaticProcessor)
     AutoModelForVision2Seq.register(OpenVLAPConfig, OpenVLAPForActionPrediction)
 
-    # Load OpenVLA Processor and Model using HF AutoClasses, then convert to OpenVLAP
+    # Load OpenVLA Processor and Model using HF AutoClasses
     # If resuming, load from checkpoint; otherwise load from original model
     model_path = checkpoint_dir if cfg.resume else cfg.vla_path
     processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-    
+
     vla = AutoModelForVision2Seq.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
@@ -517,15 +556,28 @@ def distill(cfg: DistillConfig) -> None:
         trust_remote_code=True,
     )
 
+    # Add distillation layers with random initialization
+    vla = add_distillation_layers(
+        vla,
+        action_dim=7,
+        hidden_dim=cfg.align_hidden_dim,
+        projection_dim=cfg.align_dim,
+    )
+
     # Device Placement =>> note that BitsAndBytes automatically handles for quantized training
     if cfg.use_quantization:
         vla = prepare_model_for_kbit_training(vla)
     else:
         vla = vla.to(device_id)
 
+    # Move new layers to device (if not using quantization)
+    if not cfg.use_quantization:
+        vla.distill_projection = vla.distill_projection.to(device_id)
+        vla.distill_norm = vla.distill_norm.to(device_id)
+
     # 🎯 FREEZING CONTROL POINT - finetune.py style with LoRA
     print(f"   use_lora: {cfg.use_lora}")
-    
+
     if cfg.use_lora:
         lora_config = LoraConfig(
             r=cfg.lora_rank,
@@ -536,11 +588,6 @@ def distill(cfg: DistillConfig) -> None:
         )
         vla = get_peft_model(vla, lora_config)
         vla.print_trainable_parameters()
-        # Access distillation components through the base model after LoRA wrapping
-        for param in vla.base_model.distill_projection.parameters():
-            param.requires_grad = True
-        for param in vla.base_model.distill_norm.parameters():
-            param.requires_grad = True
 
     # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
     vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
