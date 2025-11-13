@@ -65,7 +65,7 @@ class DistillConfig:
         )
     )
 
-    teacher_latent_dir: Path = Path("/home/elias/Thesis/teacher_latents")
+    teacher_latent_dir: Path = Path("/root/thesis/lapa_latents")
     pretrained_checkpoint: Optional[Path] = None
     run_root_dir: Path = Path("runs")
     run_id: Optional[str] = None
