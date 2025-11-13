@@ -737,76 +737,77 @@ def distill(cfg: DistillConfig) -> None:
     teacher_batch_norm.eval()  # Set to eval mode for non-learnable behavior
 
     # Train!
-    with tqdm.tqdm(total=total_steps, leave=False) as progress:
-        vla.train()
-        optimizer.zero_grad()
-        global_step = 0
+    vla.train()
+    optimizer.zero_grad()
+    global_step = 0
 
+    with tqdm.tqdm(total=cfg.num_epochs, desc="Epochs", leave=True) as epoch_progress:
         for epoch in range(cfg.num_epochs):
-            for batch_idx, batch in enumerate(dataloader):
+            with tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}/{cfg.num_epochs}", leave=False) as batch_progress:
+                for batch_idx, batch in enumerate(dataloader):
 
-                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    with torch.autocast("cuda", dtype=torch.bfloat16):
 
-                    student_latent_projected = vla.module.get_projected_actions_from_batch(
-                        input_ids=batch["input_ids"].to(device_id),
-                        attention_mask=batch["attention_mask"].to(device_id),
-                        pixel_values=batch["pixel_values"].to(device_id),
-                    )
+                        student_latent_projected = vla.module.get_projected_actions_from_batch(
+                            input_ids=batch["input_ids"].to(device_id),
+                            attention_mask=batch["attention_mask"].to(device_id),
+                            pixel_values=batch["pixel_values"].to(device_id),
+                        )
 
-                    teacher_hidden = batch["teacher_latent"].to(device_id)  # [batch, 4]
+                        teacher_hidden = batch["teacher_latent"].to(device_id)  # [batch, 4]
 
-                    teacher_hidden = (teacher_hidden / 7.0) * 2.0 - 1.0  # normalize to [-1, 1]
-                    # ========================================
-                    # APPLY NON-LEARNABLE BATCH NORMALIZATION TO TEACHER LATENT
-                    # ========================================
-                    teacher_hidden = teacher_batch_norm(teacher_hidden)
+                        teacher_hidden = (teacher_hidden / 7.0) * 2.0 - 1.0  # normalize to [-1, 1]
+                        # ========================================
+                        # APPLY NON-LEARNABLE BATCH NORMALIZATION TO TEACHER LATENT
+                        # ========================================
+                        teacher_hidden = teacher_batch_norm(teacher_hidden)
 
-                    # ========================================
-                    # COMPUTE COMBINED LOSS
-                    # ========================================
+                        # ========================================
+                        # COMPUTE COMBINED LOSS
+                        # ========================================
 
-                    loss, loss_dict = combined_distill_loss(
-                        z_s=student_latent_projected,  # [batch, 4] - projected student actions
-                        z_t=teacher_hidden,             # [batch, 4] - teacher latent tokens
-                        embedding_weight=cfg.distill_loss_weight,
-                        contrastive_weight=cfg.contrastive_loss_weight,
-                        loss_type=cfg.distill_loss_type,
-                        contrastive_type=cfg.contrastive_loss_type
-                    )
+                        loss, loss_dict = combined_distill_loss(
+                            z_s=student_latent_projected,  # [batch, 4] - projected student actions
+                            z_t=teacher_hidden,             # [batch, 4] - teacher latent tokens
+                            embedding_weight=cfg.distill_loss_weight,
+                            contrastive_weight=cfg.contrastive_loss_weight,
+                            loss_type=cfg.distill_loss_type,
+                            contrastive_type=cfg.contrastive_loss_type
+                        )
 
-                # Backward pass
-                loss.backward()
+                    # Backward pass
+                    loss.backward()
 
-                # Optimizer Step
-                torch.nn.utils.clip_grad_norm_(vla.parameters(), cfg.max_grad_norm)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-                progress.update()
+                    # Optimizer Step
+                    torch.nn.utils.clip_grad_norm_(vla.parameters(), cfg.max_grad_norm)
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
+                    batch_progress.update()
 
-                # Store train metrics
-                recent_losses.append(loss.item())
-                recent_embed_losses.append(loss_dict["embed_loss"])
-                recent_contrast_losses.append(loss_dict["contrast_loss"])
+                    # Store train metrics
+                    recent_losses.append(loss.item())
+                    recent_embed_losses.append(loss_dict["embed_loss"])
+                    recent_contrast_losses.append(loss_dict["contrast_loss"])
 
-                global_step += 1
+                    global_step += 1
 
-                # Compute train metrics
-                smoothened_loss = recent_losses[0]
-                smoothened_embed_loss = recent_embed_losses[0]
-                smoothened_contrast_loss = recent_contrast_losses[0]
+                    # Compute train metrics
+                    smoothened_loss = recent_losses[0]
+                    smoothened_embed_loss = recent_embed_losses[0]
+                    smoothened_contrast_loss = recent_contrast_losses[0]
 
-                # Push Metrics to W&B (every 10 gradient steps)
-                if distributed_state.is_main_process and global_step % 10 == 0:
-                    wandb.log(
-                        {
-                            "total_loss": smoothened_loss,
-                            "embed_loss": smoothened_embed_loss,
-                            "contrast_loss": smoothened_contrast_loss,
-                            "learning_rate": scheduler.get_last_lr()[0],
-                        },
-                        step=global_step,
-                    )
+                    # Push Metrics to W&B (every 10 gradient steps)
+                    if distributed_state.is_main_process and global_step % 10 == 0:
+                        wandb.log(
+                            {
+                                "total_loss": smoothened_loss,
+                                "embed_loss": smoothened_embed_loss,
+                                "contrast_loss": smoothened_contrast_loss,
+                                "learning_rate": scheduler.get_last_lr()[0],
+                            },
+                            step=global_step,
+                        )
 
             # Save Model Checkpoint after each epoch
             if (epoch + 1) % cfg.save_every_n_epochs == 0:
@@ -831,6 +832,8 @@ def distill(cfg: DistillConfig) -> None:
                         checkpoint_dir_epoch, processor, cfg,
                         distributed_state, adapter_dir_epoch
                     )
+
+            epoch_progress.update()
 
     print("Distillation Complete ✅")
     if distributed_state.is_main_process:
