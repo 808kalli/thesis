@@ -564,32 +564,31 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
 
 class OpenVLAPForActionPrediction(PrismaticForConditionalGeneration):
+    """OpenVLAP model - OpenVLA for distillation training.
+
+    Distillation layers (distill_projection, distill_norm) are added dynamically during training,
+    not defined in this class.
+    """
     config_class: PretrainedConfig = OpenVLAPConfig
 
     def __init__(self, config: OpenVLAPConfig) -> None:
         super().__init__(config)
 
-        # Store action_dim from config
-        self.action_dim = config.action_dim
+        # Initialize action bins for tokenization (same as OpenVLAForActionPrediction)
+        self.bins = np.linspace(-1, 1, config.n_action_bins)
+        self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
 
-        # Optional projection layer for distillation
-        # Projects from action_dim to teacher's latent dim
-        self.distill_projection = nn.Sequential(
-            nn.Linear(self.action_dim, config.distill_projection_hidden_dim),
-            nn.ReLU(),
-            nn.Linear(self.action_dim, config.distill_projection_dim),
-            nn.Tanh(),
-        )
-        self.distill_norm = nn.LayerNorm(
-            config.distill_projection_dim,
-            elementwise_affine=True,  # learnable γ, β
-            eps=1e-6
-        )
+        # Compute vocab size for de-tokenization -- revert added "multiple of"
+        self.vocab_size = self.config.text_config.vocab_size - self.config.pad_to_multiple_of
 
     def predict_action(
         self, input_ids: Optional[torch.LongTensor] = None, **kwargs: str
-    ) -> torch.Tensor:
-        """Thin wrapper around .generate() that decodes predicted actions and applies distillation projection."""
+    ) -> np.ndarray:
+        """Generate normalized action tokens (without unnormalization).
+
+        Converts discrete action token IDs to normalized continuous actions using bin_centers.
+        Projection layers are added dynamically during training and applied separately.
+        """
         # If the special empty token ('') does not already appear after the colon (':') token in the prompt
         # (after "OUT:" or "ASSISTANT:"), insert it to match the inputs seen at training time
         if not torch.all(input_ids[:, -1] == 29871):
@@ -598,17 +597,12 @@ class OpenVLAPForActionPrediction(PrismaticForConditionalGeneration):
             )
 
         # Run VLA inference
-        generated_ids = self.generate(input_ids, max_new_tokens=self.get_action_dim(), **kwargs)
+        generated_ids = self.generate(input_ids, max_new_tokens=7, **kwargs)
 
-        # Extract predicted action tokens (last action_dim tokens)
-        predicted_action_token_ids = generated_ids[0, -self.get_action_dim() :].cpu().numpy()
+        # Extract predicted action tokens and translate into (normalized) continuous actions
+        predicted_action_token_ids = generated_ids[0, -7:].cpu().numpy()
+        discretized_actions = self.vocab_size - predicted_action_token_ids
+        discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
+        normalized_actions = self.bin_centers[discretized_actions]
 
-        # Apply distillation projection
-        action_tensor = torch.from_numpy(predicted_action_token_ids).to(self.device).float()
-        projected_actions = self.distill_projection(action_tensor)
-        projected_actions = self.distill_norm(projected_actions)
-
-        return projected_actions
-
-    def get_action_dim(self) -> int:
-        return self.action_dim
+        return normalized_actions
