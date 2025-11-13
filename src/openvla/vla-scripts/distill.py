@@ -583,8 +583,8 @@ def distill(cfg: DistillConfig) -> None:
     run_dir, adapter_dir = cfg.run_root_dir / exp_id, cfg.adapter_tmp_dir / exp_id
     os.makedirs(run_dir, exist_ok=True)
 
-    # Initialize File Logging =>> Log file for debugging
-    log_file = run_dir / "distill.log"
+    # Initialize File Logging =>> Log file for debugging (saved in home directory)
+    log_file = Path.home() / "thesis" / f"distill_{exp_id}.log"
     log_fh = open(log_file, "a")
 
     def log_print(msg: str) -> None:
