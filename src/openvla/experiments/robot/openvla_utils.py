@@ -10,8 +10,8 @@ import torch
 from PIL import Image
 from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
 
-from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
-from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
+from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig, OpenVLAPConfig
+from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction, OpenVLAPForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
 
 # Initialize important constants and pretty-printing mode in NumPy.
@@ -70,6 +70,37 @@ def get_vla(cfg):
         )
 
     return vla
+
+
+def get_vlap(cfg):
+    """Loads and returns a VLAP model from checkpoint."""
+    # Load VLAP checkpoint.
+    print("[*] Instantiating Pretrained VLAP model")
+    print("[*] Loading in 8-BIT with Flash-Attention Disabled")
+
+    # Register OpenVLAP model to HF Auto Classes (not needed if the model is on HF Hub)
+    AutoConfig.register("openvlap", OpenVLAPConfig)
+    AutoImageProcessor.register(OpenVLAPConfig, PrismaticImageProcessor)
+    AutoProcessor.register(OpenVLAPConfig, PrismaticProcessor)
+    AutoModelForVision2Seq.register(OpenVLAPConfig, OpenVLAPForActionPrediction)
+
+    vlap = AutoModelForVision2Seq.from_pretrained(
+        cfg.pretrained_checkpoint,
+        # attn_implementation="flash_attention_2",
+        torch_dtype=torch.bfloat16,
+        load_in_8bit=cfg.load_in_8bit,
+        load_in_4bit=cfg.load_in_4bit,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True,
+    )
+
+    # Move model to device.
+    # Note: `.to()` is not supported for 8-bit or 4-bit bitsandbytes models, but the model will
+    #       already be set to the right devices and casted to the correct dtype upon loading.
+    if not cfg.load_in_8bit and not cfg.load_in_4bit:
+        vlap = vlap.to(DEVICE)
+
+    return vlap
 
 
 def get_processor(cfg):
