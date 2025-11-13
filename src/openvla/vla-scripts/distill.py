@@ -42,9 +42,10 @@ from PIL import Image
 
 import wandb
 import torch.nn as nn
-from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
-from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
+from prismatic.extern.hf.configuration_prismatic import OpenVLAPConfig, OpenVLAConfig
+from prismatic.extern.hf.modeling_prismatic import OpenVLAPForActionPrediction, OpenVLAForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+from prismatic.vla.action_tokenizer import ActionTokenizer
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -536,11 +537,11 @@ def distill(cfg: DistillConfig) -> None:
             load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4"
         )
 
-    # Register standard OpenVLA model (like in finetune.py)
-    AutoConfig.register("openvla", OpenVLAConfig)
-    AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
-    AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
-    AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
+    # Register OpenVLA model to HF Auto Classes
+    AutoConfig.register("openvlap", OpenVLAPConfig)
+    AutoImageProcessor.register(OpenVLAPConfig, PrismaticImageProcessor)
+    AutoProcessor.register(OpenVLAPConfig, PrismaticProcessor)
+    AutoModelForVision2Seq.register(OpenVLAPConfig, OpenVLAPForActionPrediction)
 
     # Load OpenVLA Processor and Model using HF AutoClasses
     # If resuming, load from checkpoint; otherwise load from original model
@@ -582,7 +583,7 @@ def distill(cfg: DistillConfig) -> None:
             r=cfg.lora_rank,
             lora_alpha=min(cfg.lora_rank, 16),
             lora_dropout=cfg.lora_dropout,
-            target_modules="all-linear",
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],  # Only LLM layers
             init_lora_weights="gaussian",
         )
         vla = get_peft_model(vla, lora_config)
