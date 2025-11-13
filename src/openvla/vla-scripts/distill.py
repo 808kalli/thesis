@@ -56,13 +56,6 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
     """
     Adds distillation projection and normalization layers to a standard OpenVLA model.
     These layers are randomly initialized and trainable.
-    Args:
-        vla_model: Loaded OpenVLAForActionPrediction model
-        action_dim: Dimension of action space (default: 7)
-        hidden_dim: Hidden dimension for projection MLP (default: 64)
-        projection_dim: Final projection dimension matching teacher latent dim (default: 4)
-    Returns:
-        Modified model with distill_projection and distill_norm layers added
     """
     vla_model.action_dim = action_dim
     
@@ -89,40 +82,36 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
             labels=None,
         )
         
+        # Extract action logits
         action_logits = output.logits[:, self.vision_backbone.featurizer.patch_embed.num_patches : -1]
-        action_preds = action_logits.argmax(dim=2)
-        action_preds = action_preds[:, -7:]  # Extract just action tokens
-        print("action_preds shape:", action_preds.shape)
-        print("action_preds[0] (first sample):", action_preds[0])  # Print first row
-
-        # Convert to continuous actions but keep gradients
-        normalized_actions_batch = []
-        for i in range(action_preds.shape[0]):
-            action_token_ids = action_preds[i].cpu().numpy()
-            discretized_actions = self.vocab_size - action_token_ids
-            discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
-            normalized_actions = self.bin_centers[discretized_actions]
-            normalized_actions_batch.append(normalized_actions)
-            
-            # Print the first sample's conversion
-            if i == 0:
-                print("First sample conversion:")
-                print(f"  action_token_ids: {action_token_ids}")
-                print(f"  discretized_actions: {discretized_actions}")
-                print(f"  normalized_actions: {normalized_actions}")
-
-        print("normalized_actions_batch[0] (first sample):", normalized_actions_batch[0])
+        action_logits = action_logits[:, -7:, :]  # [B, 7, vocab_size]
         
-        # ISSUE: This loses gradients!
-        # normalized_actions_tensor = torch.from_numpy(np.stack(normalized_actions_batch)).to(self.device).float()
+        # Differentiable argmax using Gumbel-Softmax Straight-Through
+        tau = 1.0  # temperature
+        action_soft = torch.nn.functional.gumbel_softmax(
+            action_logits, tau=tau, hard=True, dim=-1
+        )  # [B, 7, vocab_size]
         
-        # FIX: Convert to tensor while preserving gradients
-        normalized_actions_tensor = torch.tensor(np.stack(normalized_actions_batch), 
-                                            device=self.device, 
-                                            dtype=torch.float32, 
-                                            requires_grad=True)
+        # Create vocab-to-action mapping tensor (fully vectorized, no loops!)
+        device = action_logits.device
+        vocab_size = self.vocab_size
+        bin_centers_tensor = torch.tensor(self.bin_centers, device=device, dtype=torch.float32)
         
-        projected_actions = self.distill_projection(normalized_actions_tensor)
+        # Create mapping: vocab_to_action[vocab_idx] = corresponding bin center
+        vocab_to_action = torch.zeros(vocab_size, device=device, dtype=torch.float32)
+        
+        # Vectorized mapping (replaces the loop)
+        num_bins = len(self.bin_centers)
+        vocab_indices = vocab_size - 1 - torch.arange(num_bins, device=device)  # [vocab_size-1, vocab_size-2, ...]
+        vocab_indices = torch.clamp(vocab_indices, 0, vocab_size-1)  # Ensure valid indices
+        
+        vocab_to_action[vocab_indices] = bin_centers_tensor
+        
+        # Convert one-hot to continuous actions: [B, 7, vocab_size] @ [vocab_size] → [B, 7]
+        continuous_actions = torch.matmul(action_soft, vocab_to_action)
+        
+        # Apply projection
+        projected_actions = self.distill_projection(continuous_actions)
         projected_actions = self.distill_norm(projected_actions)
         
         return projected_actions
