@@ -431,49 +431,6 @@ def combined_distill_loss(
     return total_loss, loss_dict
 
 
-def print_similarity_matrices(z_s: torch.Tensor, z_t: torch.Tensor, step: int, logger=None) -> None:
-    """
-    Compute and print student and teacher similarity matrices for visualization.
-
-    Args:
-        z_s: student latent actions [batch, dim]
-        z_t: teacher latent actions [batch, dim]
-        step: training step number for logging
-        logger: optional logger function (defaults to print)
-    """
-    if logger is None:
-        logger = print
-
-    student_sim = compute_similarity_matrix(z_s)  # [batch, batch]
-    teacher_sim = compute_similarity_matrix(z_t)  # [batch, batch]
-
-    logger(f"\n{'='*80}")
-    logger(f"Step {step} - Similarity Matrices")
-    logger(f"{'='*80}")
-    logger(f"\nStudent Similarity Matrix (shape: {student_sim.shape}):")
-    logger(str(student_sim.detach().cpu().float().numpy()))
-    logger(f"\nTeacher Similarity Matrix (shape: {teacher_sim.shape}):")
-    logger(str(teacher_sim.detach().cpu().float().numpy()))
-
-    # Compute difference
-    diff = (student_sim - teacher_sim).abs()
-    logger(f"\nAbsolute Difference (|Student - Teacher|):")
-    logger(str(diff.detach().cpu().float().numpy()))
-    logger(f"Mean Absolute Difference: {diff.mean().item():.6f}")
-
-    # Extract and print diagonal values (self-similarities)
-    student_diag = torch.diagonal(student_sim).detach().cpu().float().numpy()
-    teacher_diag = torch.diagonal(teacher_sim).detach().cpu().float().numpy()
-
-    logger(f"\nDiagonal Values (Self-Similarities):")
-    logger(f"Student diagonal: {student_diag}")
-    logger(f"Teacher diagonal: {teacher_diag}")
-    logger(f"Mean Student self-similarity: {student_diag.mean():.6f}")
-    logger(f"Mean Teacher self-similarity: {teacher_diag.mean():.6f}")
-
-    logger(f"{'='*80}\n")
-
-
 def save_checkpoint(
     vla,
     optimizer,
@@ -595,16 +552,6 @@ def distill(cfg: DistillConfig) -> None:
     # Start =>> Build Directories
     run_dir, adapter_dir = cfg.run_root_dir / exp_id, cfg.adapter_tmp_dir / exp_id
     os.makedirs(run_dir, exist_ok=True)
-
-    # Initialize File Logging =>> Log file for debugging (saved in home directory)
-    log_file = Path.home() / "thesis" / f"distill_{exp_id}.log"
-    log_fh = open(log_file, "a")
-
-    def log_print(msg: str) -> None:
-        """Print to both stdout and log file."""
-        print(msg)
-        log_fh.write(msg + "\n")
-        log_fh.flush()
 
     # Initialize Logging =>> W&B
     if distributed_state.is_main_process:
@@ -787,21 +734,6 @@ def distill(cfg: DistillConfig) -> None:
                     loss_type=cfg.distill_loss_type,
                     contrastive_type=cfg.contrastive_loss_type
                 )
-
-                # Print latents and similarity matrices on first step (only main process)
-                if distributed_state.is_main_process and batch_idx == 0:
-                    log_print(f"\n{'='*80}")
-                    log_print(f"Step 1 - Student and Teacher Latents")
-                    log_print(f"{'='*80}")
-                    log_print(f"\nStudent Latent Projected (shape: {student_latent_projected.shape}):")
-                    log_print(str(student_latent_projected.detach().cpu().float().numpy()))
-                    log_print(f"\nTeacher Latent Raw (before processing, shape: {teacher_latent_raw.shape}):")
-                    log_print(str(teacher_latent_raw.detach().cpu().float().numpy()))
-                    log_print(f"\nTeacher Latent Processed (after normalization + batch norm, shape: {teacher_hidden.shape}):")
-                    log_print(str(teacher_hidden.detach().cpu().float().numpy()))
-                    log_print(f"{'='*80}\n")
-
-                    print_similarity_matrices(student_latent_projected, teacher_hidden, step=1, logger=log_print)
 
             # Backward pass
             loss.backward()
