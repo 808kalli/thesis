@@ -247,9 +247,6 @@ def compute_similarity_matrix(embeddings: torch.Tensor) -> torch.Tensor:
     # Compute pairwise similarities: [batch, hidden_dim] @ [hidden_dim, batch] -> [batch, batch]
     similarities = embeddings_norm @ embeddings_norm.T
 
-    diag_vals = torch.diag(similarities)
-    print(f"Diagonal values: {diag_vals}")
-
     return similarities
 
 
@@ -461,6 +458,17 @@ def print_similarity_matrices(z_s: torch.Tensor, z_t: torch.Tensor, step: int, l
     logger(f"\nAbsolute Difference (|Student - Teacher|):")
     logger(str(diff.detach().cpu().float().numpy()))
     logger(f"Mean Absolute Difference: {diff.mean().item():.6f}")
+
+    # Extract and print diagonal values (self-similarities)
+    student_diag = torch.diagonal(student_sim).detach().cpu().float().numpy()
+    teacher_diag = torch.diagonal(teacher_sim).detach().cpu().float().numpy()
+
+    logger(f"\nDiagonal Values (Self-Similarities):")
+    logger(f"Student diagonal: {student_diag}")
+    logger(f"Teacher diagonal: {teacher_diag}")
+    logger(f"Mean Student self-similarity: {student_diag.mean():.6f}")
+    logger(f"Mean Teacher self-similarity: {teacher_diag.mean():.6f}")
+
     logger(f"{'='*80}\n")
 
 
@@ -760,17 +768,6 @@ def distill(cfg: DistillConfig) -> None:
                 # ========================================
                 # COMPUTE COMBINED LOSS
                 # ========================================
-
-                # Print student and teacher latents on first batch (only main process)
-                if distributed_state.is_main_process and batch_idx == 0:
-                    log_print(f"\n{'='*80}")
-                    log_print(f"Step 1 - Student and Teacher Latents (Before Loss)")
-                    log_print(f"{'='*80}")
-                    log_print(f"\nStudent Latent Projected (shape: {student_latent_projected.shape}):")
-                    log_print(str(student_latent_projected.detach().cpu().numpy()))
-                    log_print(f"\nTeacher Hidden (shape: {teacher_hidden.shape}):")
-                    log_print(str(teacher_hidden.detach().cpu().numpy()))
-                    log_print(f"{'='*80}\n")
 
                 loss, loss_dict = combined_distill_loss(
                     z_s=student_latent_projected,  # [batch, 4] - projected student actions
