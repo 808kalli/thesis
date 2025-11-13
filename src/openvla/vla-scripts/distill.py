@@ -797,6 +797,8 @@ def distill(cfg: DistillConfig) -> None:
                     log_print(str(student_latent_projected.detach().cpu().float().numpy()))
                     log_print(f"\nTeacher Latent Raw (before processing, shape: {teacher_latent_raw.shape}):")
                     log_print(str(teacher_latent_raw.detach().cpu().float().numpy()))
+                    log_print(f"\nTeacher Latent Processed (after normalization + batch norm, shape: {teacher_hidden.shape}):")
+                    log_print(str(teacher_hidden.detach().cpu().float().numpy()))
                     log_print(f"{'='*80}\n")
 
                     print_similarity_matrices(student_latent_projected, teacher_hidden, step=1, logger=log_print)
