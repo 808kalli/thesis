@@ -140,8 +140,8 @@ class PrismaticConfig(PretrainedConfig):
 #         super().__init__(**kwargs)
 
 
-class OpenVLAConfig(PrismaticConfig):
-    model_type: str = "openvla"
+class OpenVLAPConfig(PrismaticConfig):
+    model_type: str = "openvlap"
 
     def __init__(self, n_action_bins: int = 256, **kwargs: str) -> None:
         self.n_action_bins = n_action_bins
