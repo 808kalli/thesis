@@ -247,6 +247,9 @@ def compute_similarity_matrix(embeddings: torch.Tensor) -> torch.Tensor:
     # Compute pairwise similarities: [batch, hidden_dim] @ [hidden_dim, batch] -> [batch, batch]
     similarities = embeddings_norm @ embeddings_norm.T
 
+    diag_vals = torch.diag(similarities)
+    print(f"Diagonal values: {diag_vals}")
+
     return similarities
 
 
