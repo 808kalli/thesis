@@ -778,8 +778,17 @@ def distill(cfg: DistillConfig) -> None:
                     contrastive_type=cfg.contrastive_loss_type
                 )
 
-                # Print similarity matrices on first step (only main process)
+                # Print latents and similarity matrices on first step (only main process)
                 if distributed_state.is_main_process and batch_idx == 0:
+                    log_print(f"\n{'='*80}")
+                    log_print(f"Step 1 - Student and Teacher Latents")
+                    log_print(f"{'='*80}")
+                    log_print(f"\nStudent Latent Projected (shape: {student_latent_projected.shape}):")
+                    log_print(str(student_latent_projected.detach().cpu().float().numpy()))
+                    log_print(f"\nTeacher Hidden (shape: {teacher_hidden.shape}):")
+                    log_print(str(teacher_hidden.detach().cpu().float().numpy()))
+                    log_print(f"{'='*80}\n")
+
                     print_similarity_matrices(student_latent_projected, teacher_hidden, step=1, logger=log_print)
 
             # Backward pass
