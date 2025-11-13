@@ -92,7 +92,9 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
         action_logits = output.logits[:, self.vision_backbone.featurizer.patch_embed.num_patches : -1]
         action_preds = action_logits.argmax(dim=2)
         action_preds = action_preds[:, -7:]  # Extract just action tokens
-        
+        print("action_preds shape:", action_preds.shape)
+        print("action_preds[0] (first sample):", action_preds[0])  # Print first row
+
         # Convert to continuous actions but keep gradients
         normalized_actions_batch = []
         for i in range(action_preds.shape[0]):
@@ -101,6 +103,15 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
             discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
             normalized_actions = self.bin_centers[discretized_actions]
             normalized_actions_batch.append(normalized_actions)
+            
+            # Print the first sample's conversion
+            if i == 0:
+                print("First sample conversion:")
+                print(f"  action_token_ids: {action_token_ids}")
+                print(f"  discretized_actions: {discretized_actions}")
+                print(f"  normalized_actions: {normalized_actions}")
+
+        print("normalized_actions_batch[0] (first sample):", normalized_actions_batch[0])
         
         # ISSUE: This loses gradients!
         # normalized_actions_tensor = torch.from_numpy(np.stack(normalized_actions_batch)).to(self.device).float()
