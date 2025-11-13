@@ -76,9 +76,6 @@ class DistillConfig:
     align_dim: int = 4                                               # LAPA's latent action dimension
     align_hidden_dim: int = 64                                       # Hidden projection dimension (7 → 64 → 4)
 
-    # Training Parameters - 🎯 FREEZING CONTROL POINT (finetune.py style)
-    train_projection_only: bool = False                             # If True, only train distillation projection (freeze all model params)
-
     # LoRA Arguments
     use_lora: bool = True                                            # Whether to use LoRA fine-tuning
     lora_rank: int = 32                                              # Rank of LoRA weight matrix
@@ -472,8 +469,6 @@ def distill(cfg: DistillConfig) -> None:
     exp_id = f"openvlap-distill-b{cfg.batch_size}-lr{cfg.learning_rate}"
     if cfg.use_lora:
         exp_id += f"-lora-r{cfg.lora_rank}"
-    if cfg.train_projection_only:
-        exp_id += "-proj-only"
     if cfg.run_id_note is not None:
         exp_id += f"--{cfg.run_id_note}"
 
@@ -529,7 +524,6 @@ def distill(cfg: DistillConfig) -> None:
         vla = vla.to(device_id)
 
     # 🎯 FREEZING CONTROL POINT - finetune.py style with LoRA
-    print(f"   train_projection_only: {cfg.train_projection_only}")
     print(f"   use_lora: {cfg.use_lora}")
     
     if cfg.use_lora:
@@ -542,11 +536,11 @@ def distill(cfg: DistillConfig) -> None:
         )
         vla = get_peft_model(vla, lora_config)
         vla.print_trainable_parameters()
-
-    for param in vla.distill_projection.parameters():
-        param.requires_grad = True
-    for param in vla.distill_norm.parameters():
-        param.requires_grad = True
+        # Access distillation components through the base model after LoRA wrapping
+        for param in vla.base_model.distill_projection.parameters():
+            param.requires_grad = True
+        for param in vla.base_model.distill_norm.parameters():
+            param.requires_grad = True
 
     # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
     vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
