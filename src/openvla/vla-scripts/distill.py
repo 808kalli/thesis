@@ -42,10 +42,9 @@ from PIL import Image
 
 import wandb
 import torch.nn as nn
-from prismatic.extern.hf.configuration_prismatic import OpenVLAPConfig, OpenVLAConfig
-from prismatic.extern.hf.modeling_prismatic import OpenVLAPForActionPrediction, OpenVLAForActionPrediction
+from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
+from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
-from prismatic.vla.action_tokenizer import ActionTokenizer
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
