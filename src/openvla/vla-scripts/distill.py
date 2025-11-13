@@ -53,73 +53,72 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64, projection_dim: int = 4):
-    """
-    Adds distillation projection and normalization layers to a standard OpenVLA model.
-    These layers are randomly initialized and trainable.
-    """
+
     vla_model.action_dim = action_dim
-    
-    # Add distillation projection layers (randomly initialized)
+
     vla_model.distill_projection = nn.Sequential(
         nn.Linear(action_dim, hidden_dim),
         nn.ReLU(),
         nn.Linear(hidden_dim, projection_dim),
         nn.Tanh(),
     )
-    
-    # Add distillation normalization layer (randomly initialized)
+
     vla_model.distill_norm = nn.LayerNorm(
         projection_dim,
-        elementwise_affine=True,  # learnable γ, β
+        elementwise_affine=True,
         eps=1e-6
     )
-    
+
     def get_projected_actions_from_batch(self, input_ids, attention_mask, pixel_values):
+
         output = self.forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
             pixel_values=pixel_values,
             labels=None,
         )
-        
+
         # Extract action logits
-        action_logits = output.logits[:, self.vision_backbone.featurizer.patch_embed.num_patches : -1]
-        action_logits = action_logits[:, -7:, :]  # [B, 7, vocab_size]
-        
-        # Differentiable argmax using Gumbel-Softmax Straight-Through
-        tau = 1.0  # temperature
+        action_logits = output.logits[
+            :, self.vision_backbone.featurizer.patch_embed.num_patches : -1
+        ]
+        action_logits = action_logits[:, -7:, :]  # [B, 7, vocab]
+
+        # === Differentiable argmax ===
+        tau = 1.0
         action_soft = torch.nn.functional.gumbel_softmax(
             action_logits, tau=tau, hard=True, dim=-1
-        )  # [B, 7, vocab_size]
-        
-        # Create vocab-to-action mapping tensor (fully vectorized, no loops!)
+        )  # [B, 7, vocab]
+
+        # === Correct device ===
         device = action_logits.device
         vocab_size = self.vocab_size
-        bin_centers_tensor = torch.tensor(self.bin_centers, device=device, dtype=torch.float32)
-        
-        # Create mapping: vocab_to_action[vocab_idx] = corresponding bin center
-        vocab_to_action = torch.zeros(vocab_size, device=device, dtype=torch.float32)
-        
-        # Vectorized mapping (replaces the loop)
         num_bins = len(self.bin_centers)
-        vocab_indices = vocab_size - 1 - torch.arange(num_bins, device=device)  # [vocab_size-1, vocab_size-2, ...]
-        vocab_indices = torch.clamp(vocab_indices, 0, vocab_size-1)  # Ensure valid indices
-        
+
+        # === Build vocab → continuous-action mapping (vectorized) ===
+        bin_centers_tensor = torch.tensor(
+            self.bin_centers, device=device, dtype=torch.float32
+        )
+
+        vocab_to_action = torch.zeros(vocab_size, device=device, dtype=torch.float32)
+
+        # reverse bin indices
+        vocab_indices = vocab_size - 1 - torch.arange(num_bins, device=device)
+
         vocab_to_action[vocab_indices] = bin_centers_tensor
-        
-        # Convert one-hot to continuous actions: [B, 7, vocab_size] @ [vocab_size] → [B, 7]
-        continuous_actions = torch.matmul(action_soft, vocab_to_action)
-        
-        # Apply projection
+
+        # === continuous = sum(one_hot * bin_center) ===
+        continuous_actions = action_soft @ vocab_to_action  # [B, 7]
+
+        # === Project ===
         projected_actions = self.distill_projection(continuous_actions)
         projected_actions = self.distill_norm(projected_actions)
-        
+
         return projected_actions
-    
-    # Bind the method to the model instance
+
     vla_model.get_projected_actions_from_batch = get_projected_actions_from_batch.__get__(vla_model)
-    
     return vla_model
+
 
 
 @dataclass
