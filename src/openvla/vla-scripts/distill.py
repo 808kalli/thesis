@@ -45,7 +45,7 @@ import torch.nn as nn
 from prismatic.extern.hf.configuration_prismatic import OpenVLAPConfig, OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAPForActionPrediction, OpenVLAForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
-from prismatic.vla.action_tokenizer import ActionTokenizer
+from prismatic.util.data_utils import PaddedCollatorForActionPrediction
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -54,20 +54,17 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64, projection_dim: int = 4):
     """
     Adds distillation projection and normalization layers to a standard OpenVLA model.
-
     These layers are randomly initialized and trainable.
-
     Args:
         vla_model: Loaded OpenVLAForActionPrediction model
         action_dim: Dimension of action space (default: 7)
         hidden_dim: Hidden dimension for projection MLP (default: 64)
         projection_dim: Final projection dimension matching teacher latent dim (default: 4)
-
     Returns:
         Modified model with distill_projection and distill_norm layers added
     """
     vla_model.action_dim = action_dim
-
+    
     # Add distillation projection layers (randomly initialized)
     vla_model.distill_projection = nn.Sequential(
         nn.Linear(action_dim, hidden_dim),
@@ -75,17 +72,43 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
         nn.Linear(hidden_dim, projection_dim),
         nn.Tanh(),
     )
-
+    
     # Add distillation normalization layer (randomly initialized)
     vla_model.distill_norm = nn.LayerNorm(
         projection_dim,
         elementwise_affine=True,  # learnable γ, β
         eps=1e-6
     )
-
-    # Add the get_action_dim method
-    vla_model.get_action_dim = lambda: vla_model.action_dim
-
+    
+    def get_projected_actions_from_batch(self, input_ids, attention_mask, pixel_values):
+        """Get projected actions from tokenized batch"""
+        output = self.forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pixel_values=pixel_values,
+            labels=None,
+        )
+        
+        action_logits = output.logits[:, self.vision_backbone.featurizer.patch_embed.num_patches : -1]
+        action_preds = action_logits.argmax(dim=2)
+        
+        normalized_actions_batch = []
+        for i in range(action_preds.shape[0]):
+            action_token_ids = action_preds[i].cpu().numpy()
+            discretized_actions = self.vocab_size - action_token_ids
+            discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
+            normalized_actions = self.bin_centers[discretized_actions]
+            normalized_actions_batch.append(normalized_actions)
+        
+        normalized_actions_tensor = torch.from_numpy(np.stack(normalized_actions_batch)).to(self.device).float()
+        projected_actions = self.distill_projection(normalized_actions_tensor)
+        projected_actions = self.distill_norm(projected_actions)
+        
+        return projected_actions
+    
+    # Bind the method to the model instance
+    vla_model.get_projected_actions_from_batch = get_projected_actions_from_batch.__get__(vla_model)
+    
     return vla_model
 
 
@@ -145,45 +168,53 @@ class DistillConfig:
 
 class VLADistillDataset(Dataset):
     """
-    Loads .npy files containing individual frame data (rgb, prompt, teacher_latent, video_id, frame_number).
-
-    Each .npy file corresponds to a single frame from a video.
-    Filename format: {video_id}_{frame_number}.npy
-    where frame_number is the actual video frame (0, 30, 60, ...)
-
-    teacher_latent should be the LAPA latent action tokens:
-        - Shape: [4] containing token IDs from 0-7 (8-word vocabulary)
-        - These are the discrete latent action codes produced by LAPA
-
-    video_id and frame_number are included to allow stitching frames back together if needed.
+    Loads .npy files and tokenizes prompts + processes images for distillation training.
+    Returns input_ids, pixel_values, and teacher_latent ready for VLA model.
     """
-
-    def __init__(self, npy_dir: Path):
+    
+    def __init__(self, npy_dir: Path, processor):
         self.paths = sorted(Path(npy_dir).glob("*.npy"))
         if not self.paths:
             raise FileNotFoundError(f"No .npy files found in {npy_dir}")
+        
+        self.processor = processor
+        
+        # Import prompt builder (same as finetune.py)
+        from prismatic.models.backbones.llm.prompting import PurePromptBuilder
+        self.prompt_builder_fn = PurePromptBuilder
 
     def __len__(self):
         return len(self.paths)
 
     def __getitem__(self, idx):
         data = np.load(self.paths[idx], allow_pickle=True).item()
-        rgb = torch.tensor(data["rgb"]).permute(2, 0, 1).float() / 255.0
+        
+        # Load raw data
+        rgb = data["rgb"]  # Keep as numpy array for PIL conversion
         prompt = data["prompt"]
-
-        # Teacher latent: LAPA's 4 token IDs (discrete)
         teacher_latent = torch.tensor(data["teacher_latent"]).float()
-
-        # Video ID and frame number for potential stitching back together
-        video_id = data.get("video_id", self.paths[idx].stem.rsplit("_", 1)[0])
-        frame_number = data.get("frame_number", int(self.paths[idx].stem.rsplit("_", 1)[1]))
-
+        
+        # Convert image to PIL (like RLDSBatchTransform does)
+        rgb_pil = Image.fromarray(rgb.astype(np.uint8))
+        
+        # Build prompt (same format as RLDSBatchTransform, but no action tokens)
+        prompt_builder = self.prompt_builder_fn("openvla")
+        prompt_builder.add_turn("human", f"What action should the robot take to {prompt.lower()}?")
+        prompt_text = prompt_builder.get_prompt()
+        
+        # Tokenize prompt (like RLDSBatchTransform does)
+        input_ids = self.processor.tokenizer(prompt_text, add_special_tokens=True).input_ids
+        input_ids = torch.tensor(input_ids)
+        
+        # Process image (like RLDSBatchTransform does)
+        pixel_values = self.processor.image_processor.apply_transform(rgb_pil)
+        
         return {
-            "image": rgb,
-            "prompt": prompt,
+            "input_ids": input_ids,
+            "pixel_values": pixel_values, 
             "teacher_latent": teacher_latent,
-            "video_id": video_id,
-            "frame_number": frame_number,
+            "video_id": data.get("video_id", self.paths[idx].stem.rsplit("_", 1)[0]),
+            "frame_number": data.get("frame_number", int(self.paths[idx].stem.rsplit("_", 1)[1])),
         }
 
 
@@ -607,13 +638,19 @@ def distill(cfg: DistillConfig) -> None:
     )
 
     # Load Distillation Dataset
-    dataset = VLADistillDataset(cfg.teacher_latent_dir)
+    dataset = VLADistillDataset(cfg.teacher_latent_dir, processor)
 
-    # Create DataLoader
+    collator = PaddedCollatorForActionPrediction(
+        processor.tokenizer.model_max_length, 
+        processor.tokenizer.pad_token_id, 
+        padding_side="right"
+    )
+
     dataloader = DataLoader(
         dataset,
         batch_size=cfg.batch_size,
         shuffle=True,
+        collate_fn=collator,
         num_workers=0,
     )
 
@@ -632,30 +669,12 @@ def distill(cfg: DistillConfig) -> None:
         for batch_idx, batch in enumerate(dataloader):
             
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                # Prepare batch data
-                images = batch["image"].to(device_id)  # [batch, C, H, W]
-                prompts = batch["prompt"]  # List of strings
-                teacher_hidden = batch["teacher_latent"].to(device_id)  # [batch, 4]
-                teacher_hidden = (teacher_hidden / 7.0) * 2.0 - 1.0  # normalize to [-1, 1]
-
-                # ========================================
-                # STUDENT FORWARD PASS - Get Projected Latent Actions via OpenVLAP
-                # ========================================
-                student_latent_list = []
-                for i in range(len(prompts)):
-                    # Convert tensor image back to PIL Image for OpenVLAP
-                    rgb_tensor = images[i]  # [C, H, W] in range [0, 1]
-                    rgb_pil = Image.fromarray((rgb_tensor.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8))
-                    
-                    # Use OpenVLAP's predict_action which returns projected 4D actions directly
-                    projected_action = vla.module.predict_action(rgb_pil, prompts[i])
-                    
-                    if not isinstance(projected_action, torch.Tensor):
-                        projected_action = torch.tensor(projected_action).to(device_id).float()
-                    
-                    student_latent_list.append(projected_action)
-
-                student_latent_projected = torch.stack(student_latent_list)  # [batch, 4]
+                
+                student_latent_projected = vla.module.get_projected_actions_from_batch(
+                    input_ids=batch["input_ids"].to(device_id),
+                    attention_mask=batch["attention_mask"].to(device_id),
+                    pixel_values=batch["pixel_values"].to(device_id),
+                )
 
                 # ========================================
                 # APPLY NON-LEARNABLE LAYER NORMALIZATION TO TEACHER LATENT
