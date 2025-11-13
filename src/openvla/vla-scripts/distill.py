@@ -641,18 +641,35 @@ def distill(cfg: DistillConfig) -> None:
     # Load Distillation Dataset
     dataset = VLADistillDataset(cfg.teacher_latent_dir, processor)
 
-    # Use standard HuggingFace collator that only expects input_ids
-    collator = DataCollatorWithPadding(
-        tokenizer=processor.tokenizer,
-        padding=True,
-        return_tensors="pt"
-    )
+    def distill_collator(batch):
+        # Pad input_ids
+        input_ids = [item["input_ids"] for item in batch]
+        max_len = max(len(ids) for ids in input_ids)
+        
+        padded_input_ids = []
+        attention_masks = []
+        
+        for ids in input_ids:
+            pad_len = max_len - len(ids)
+            padded_ids = torch.cat([ids, torch.full((pad_len,), processor.tokenizer.pad_token_id)])
+            attention_mask = torch.cat([torch.ones(len(ids)), torch.zeros(pad_len)])
+            
+            padded_input_ids.append(padded_ids)
+            attention_masks.append(attention_mask)
+        
+        return {
+            "input_ids": torch.stack(padded_input_ids),
+            "attention_mask": torch.stack(attention_masks),
+            "pixel_values": torch.stack([item["pixel_values"] for item in batch]),
+            "teacher_latent": torch.stack([item["teacher_latent"] for item in batch]),
+        }
 
+    # Use the custom collator
     dataloader = DataLoader(
         dataset,
         batch_size=cfg.batch_size,
         shuffle=True,
-        collate_fn=collator,
+        collate_fn=distill_collator,
         num_workers=0,
     )
 
