@@ -63,10 +63,12 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
         nn.Tanh(),
     )
 
-    vla_model.distill_norm = nn.LayerNorm(
+    vla_model.distill_norm = nn.BatchNorm1d(
         projection_dim,
-        elementwise_affine=True,
-        eps=1e-6
+        eps=1e-6,
+        momentum=0.1,
+        affine=True,  # learnable parameters (gamma and beta)
+        track_running_stats=True
     )
 
     def get_projected_actions_from_batch(self, input_ids, attention_mask, pixel_values):
@@ -737,6 +739,16 @@ def distill(cfg: DistillConfig) -> None:
     recent_embed_losses = deque(maxlen=1)
     recent_contrast_losses = deque(maxlen=1)
 
+    # Create non-learnable BatchNorm1d for teacher latents
+    teacher_batch_norm = nn.BatchNorm1d(
+        4,  # projection_dim = 4
+        eps=1e-6,
+        momentum=0.1,
+        affine=False,  # Non-learnable (no gamma/beta parameters)
+        track_running_stats=False  # Don't track running statistics
+    ).to(device_id)
+    teacher_batch_norm.eval()  # Set to eval mode for non-learnable behavior
+
     # Train!
     with tqdm.tqdm(total=cfg.max_steps, leave=False) as progress:
         vla.train()
@@ -759,15 +771,9 @@ def distill(cfg: DistillConfig) -> None:
 
                 teacher_hidden = (teacher_hidden / 7.0) * 2.0 - 1.0  # normalize to [-1, 1]
                 # ========================================
-                # APPLY NON-LEARNABLE LAYER NORMALIZATION TO TEACHER LATENT
+                # APPLY NON-LEARNABLE BATCH NORMALIZATION TO TEACHER LATENT
                 # ========================================
-                teacher_hidden = torch.nn.functional.layer_norm(
-                    teacher_hidden,
-                    normalized_shape=(teacher_hidden.shape[-1],),
-                    weight=None,  # No learnable affine parameters
-                    bias=None,    # No learnable affine parameters
-                    eps=1e-6
-                )
+                teacher_hidden = teacher_batch_norm(teacher_hidden)
 
                 # ========================================
                 # COMPUTE COMBINED LOSS
