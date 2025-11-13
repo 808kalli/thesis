@@ -92,24 +92,19 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
 
         # === Correct device ===
         device = action_logits.device
-        vocab_size = self.vocab_size
-        print("VOCAB SIZE:", vocab_size)
+        vocab_size = action_logits.shape[-1]   # <-- IMPORTANT: true vocab size
         num_bins = len(self.bin_centers)
 
-        # === Build vocab → continuous-action mapping (vectorized) ===
         bin_centers_tensor = torch.tensor(
             self.bin_centers, device=device, dtype=torch.float32
         )
 
         vocab_to_action = torch.zeros(vocab_size, device=device, dtype=torch.float32)
 
-        # reverse bin indices
         vocab_indices = vocab_size - 1 - torch.arange(num_bins, device=device)
-
         vocab_to_action[vocab_indices] = bin_centers_tensor
 
-        # === continuous = sum(one_hot * bin_center) ===
-        continuous_actions = action_soft @ vocab_to_action  # [B, 7]
+        continuous_actions = action_soft @ vocab_to_action
 
         # === Project ===
         projected_actions = self.distill_projection(continuous_actions)
