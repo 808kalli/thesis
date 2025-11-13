@@ -89,14 +89,11 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
             labels=None,
         )
         
-        # Use the same slice as finetune.py (this should fix your shape issue)
         action_logits = output.logits[:, self.vision_backbone.featurizer.patch_embed.num_patches : -1]
         action_preds = action_logits.argmax(dim=2)
-
-        # Extract ONLY the last 7 action tokens
-        action_preds = action_preds[:, -7:]
+        action_preds = action_preds[:, -7:]  # Extract just action tokens
         
-        # Use the SAME conversion logic as predict_action
+        # Convert to continuous actions but keep gradients
         normalized_actions_batch = []
         for i in range(action_preds.shape[0]):
             action_token_ids = action_preds[i].cpu().numpy()
@@ -105,8 +102,15 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
             normalized_actions = self.bin_centers[discretized_actions]
             normalized_actions_batch.append(normalized_actions)
         
-        # Apply distillation projection
-        normalized_actions_tensor = torch.from_numpy(np.stack(normalized_actions_batch)).to(self.device).float()
+        # ISSUE: This loses gradients!
+        # normalized_actions_tensor = torch.from_numpy(np.stack(normalized_actions_batch)).to(self.device).float()
+        
+        # FIX: Convert to tensor while preserving gradients
+        normalized_actions_tensor = torch.tensor(np.stack(normalized_actions_batch), 
+                                            device=self.device, 
+                                            dtype=torch.float32, 
+                                            requires_grad=True)
+        
         projected_actions = self.distill_projection(normalized_actions_tensor)
         projected_actions = self.distill_norm(projected_actions)
         
