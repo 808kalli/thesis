@@ -1,7 +1,8 @@
 # === LARGE DIRECTORIES (datasets, models, logs) ===
 data/
 raw_datasets/
-models/
+/models/
+!/src/openvla/prismatic/vla/models/
 logs/
 rollouts/
 lapa_latents/
