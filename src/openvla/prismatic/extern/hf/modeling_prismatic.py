@@ -27,7 +27,7 @@ from timm.models.vision_transformer import LayerScale
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import ModelOutput
 
-from .configuration_prismatic import OpenVLAConfig, OpenVLAPConfig, PrismaticConfig
+from .configuration_prismatic import OpenVLAConfig, PrismaticConfig
 
 # Get Logger
 logger = logging.getLogger(__name__)
@@ -569,9 +569,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
     Distillation layers (distill_projection, distill_norm) are added dynamically during training,
     not defined in this class.
     """
-    config_class: PretrainedConfig = OpenVLAPConfig
+    config_class: PretrainedConfig = OpenVLAConfig
 
-    def __init__(self, config: OpenVLAPConfig) -> None:
+    def __init__(self, config: OpenVLAConfig) -> None:
         super().__init__(config)
 
         # Initialize action bins for tokenization (same as OpenVLAForActionPrediction)
