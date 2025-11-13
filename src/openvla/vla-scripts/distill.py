@@ -82,7 +82,6 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
     )
     
     def get_projected_actions_from_batch(self, input_ids, attention_mask, pixel_values):
-        """Get projected actions from tokenized batch"""
         output = self.forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -90,9 +89,11 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
             labels=None,
         )
         
+        # Use the same slice as finetune.py (this should fix your shape issue)
         action_logits = output.logits[:, self.vision_backbone.featurizer.patch_embed.num_patches : -1]
         action_preds = action_logits.argmax(dim=2)
         
+        # Use the SAME conversion logic as predict_action
         normalized_actions_batch = []
         for i in range(action_preds.shape[0]):
             action_token_ids = action_preds[i].cpu().numpy()
@@ -101,6 +102,7 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
             normalized_actions = self.bin_centers[discretized_actions]
             normalized_actions_batch.append(normalized_actions)
         
+        # Apply distillation projection
         normalized_actions_tensor = torch.from_numpy(np.stack(normalized_actions_batch)).to(self.device).float()
         projected_actions = self.distill_projection(normalized_actions_tensor)
         projected_actions = self.distill_norm(projected_actions)
