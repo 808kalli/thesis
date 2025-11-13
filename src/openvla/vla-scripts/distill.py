@@ -46,6 +46,7 @@ from prismatic.extern.hf.configuration_prismatic import OpenVLAPConfig, OpenVLAC
 from prismatic.extern.hf.modeling_prismatic import OpenVLAPForActionPrediction, OpenVLAForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
 from prismatic.util.data_utils import PaddedCollatorForActionPrediction
+from transformers import DataCollatorWithPadding
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -640,10 +641,11 @@ def distill(cfg: DistillConfig) -> None:
     # Load Distillation Dataset
     dataset = VLADistillDataset(cfg.teacher_latent_dir, processor)
 
-    collator = PaddedCollatorForActionPrediction(
-        processor.tokenizer.model_max_length, 
-        processor.tokenizer.pad_token_id, 
-        padding_side="right"
+    # Use standard HuggingFace collator that only expects input_ids
+    collator = DataCollatorWithPadding(
+        tokenizer=processor.tokenizer,
+        padding=True,
+        return_tensors="pt"
     )
 
     dataloader = DataLoader(
@@ -676,6 +678,8 @@ def distill(cfg: DistillConfig) -> None:
                     pixel_values=batch["pixel_values"].to(device_id),
                 )
 
+                teacher_hidden = batch["teacher_latent"].to(device_id)  # [batch, 4]
+                teacher_hidden = (teacher_hidden / 7.0) * 2.0 - 1.0  # normalize to [-1, 1]
                 # ========================================
                 # APPLY NON-LEARNABLE LAYER NORMALIZATION TO TEACHER LATENT
                 # ========================================
