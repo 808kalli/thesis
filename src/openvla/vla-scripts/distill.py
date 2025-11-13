@@ -741,9 +741,9 @@ def distill(cfg: DistillConfig) -> None:
     optimizer.zero_grad()
     global_step = 0
 
-    with tqdm.tqdm(total=cfg.num_epochs, desc="Epochs", leave=True) as epoch_progress:
+    with tqdm.tqdm(total=cfg.num_epochs, desc="Overall Progress", leave=True, position=1) as epoch_progress:
         for epoch in range(cfg.num_epochs):
-            with tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}/{cfg.num_epochs}", leave=False) as batch_progress:
+            with tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}/{cfg.num_epochs}", leave=False, position=0) as batch_progress:
                 for batch_idx, batch in enumerate(dataloader):
 
                     with torch.autocast("cuda", dtype=torch.bfloat16):
