@@ -89,7 +89,7 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
         # === Differentiable argmax ===
         tau = 1.0
         action_soft = torch.nn.functional.gumbel_softmax(
-            action_logits, tau=tau, hard=True, dim=-1
+            action_logits, tau=tau, hard=False, dim=-1
         )  # [B, 7, vocab]
 
         # === Correct device ===
@@ -133,7 +133,7 @@ class DistillConfig:
     batch_size: int = 64                                            # Distillation batch size
     num_epochs: int = 10                                            # Number of epochs (full passes through dataset)
     save_every_n_epochs: int = 1                                    # Save checkpoint every N epochs
-    learning_rate: float = 1e-4                                     # Distillation learning rate
+    learning_rate: float = 1e-5                                     # Distillation learning rate
     grad_accumulation_steps: int = 1                                # Gradient accumulation steps
     save_latest_checkpoint_only: bool = True                        # Whether to save only one checkpoint per run
 
