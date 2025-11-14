@@ -660,7 +660,6 @@ def distill(cfg: DistillConfig) -> None:
     # Move new layers to device (if not using quantization)
     if not cfg.use_quantization:
         vla.distill_projection = vla.distill_projection.to(device_id)
-        vla.distill_norm = vla.distill_norm.to(device_id)
 
     # 🎯 FREEZING CONTROL POINT - finetune.py style with LoRA
     print(f"use_lora: {cfg.use_lora}")
