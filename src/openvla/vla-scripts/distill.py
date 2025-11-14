@@ -16,6 +16,16 @@ Run with:
     - [Single GPU]: python distill.py
     - [Override Config Values]: python distill.py --batch_size 32 --learning_rate 1e-4 ...
     - [Resume Training]: python distill.py --resume --resume_from_checkpoint <PATH/TO/CHECKPOINT/DIR>
+
+Usage:
+    torchrun --standalone --nnodes=1 --nproc-per-node=1 vla-scripts/distill.py \
+        --batch_size 24 \
+        --learning_rate 1e-4 \
+        --teacher_latent_dir /root/thesis/lapa_latents \
+        --num_epochs 10 --save_every_n_epochs 1 \
+        --contrastive_loss_type "kl_divergence" \
+        --wandb_entity "eliaskallioras-national-technical-university-of-athens"
+
 """
 
 import os
@@ -63,13 +73,7 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
         nn.Tanh(),
     )
 
-    vla_model.distill_norm = nn.BatchNorm1d(
-        projection_dim,
-        eps=1e-6,
-        momentum=0.1,
-        affine=True,  # learnable parameters (gamma and beta)
-        track_running_stats=True
-    )
+    vla_model.distill_norm = nn.LayerNorm(projection_dim, eps=1e-6)  # learnable (affine=True by default)
 
     def get_projected_actions_from_batch(self, input_ids, attention_mask, pixel_values):
 
@@ -180,12 +184,28 @@ class VLADistillDataset(Dataset):
     """
     
     def __init__(self, npy_dir: Path, processor):
-        self.paths = sorted(Path(npy_dir).glob("*.npy"))
-        if not self.paths:
+        all_paths = sorted(Path(npy_dir).glob("*.npy"))
+        if not all_paths:
             raise FileNotFoundError(f"No .npy files found in {npy_dir}")
-        
+
+        # Filter out vectors where all 4 elements are the same (become 0 after layer norm)
+        self.paths = []
+        filtered_count = 0
+        for path in all_paths:
+            data = np.load(path, allow_pickle=True).item()
+            teacher_latent = np.array(data["teacher_latent"])
+
+            # Check if all 4 elements are the same (within small tolerance)
+            if not np.allclose(teacher_latent, teacher_latent[0]):
+                self.paths.append(path)
+            else:
+                filtered_count += 1
+
+        print(f"Filtered out {filtered_count} teacher vectors with identical elements (would be 0 after layer norm)")
+        print(f"Keeping {len(self.paths)} valid teacher vectors out of {len(all_paths)}")
+
         self.processor = processor
-        
+
         # Import prompt builder (same as finetune.py)
         from prismatic.models.backbones.llm.prompting import PurePromptBuilder
         self.prompt_builder_fn = PurePromptBuilder
@@ -726,15 +746,23 @@ def distill(cfg: DistillConfig) -> None:
     recent_embed_losses = deque(maxlen=1)
     recent_contrast_losses = deque(maxlen=1)
 
-    # Create non-learnable BatchNorm1d for teacher latents
-    teacher_batch_norm = nn.BatchNorm1d(
-        4,  # projection_dim = 4
-        eps=1e-6,
-        momentum=0.1,
-        affine=False,  # Non-learnable (no gamma/beta parameters)
-        track_running_stats=False  # Don't track running statistics
-    ).to(device_id)
-    teacher_batch_norm.eval()  # Set to eval mode for non-learnable behavior
+    # Create non-learnable LayerNorm for teacher latents
+    class NonLearnableLayerNorm(nn.Module):
+        def __init__(self, normalized_shape, eps=1e-6):
+            super().__init__()
+            self.normalized_shape = normalized_shape
+            self.eps = eps
+
+        def forward(self, x):
+            return torch.nn.functional.layer_norm(
+                x,
+                normalized_shape=(x.shape[-1],),
+                weight=None,
+                bias=None,
+                eps=self.eps
+            )
+
+    teacher_layer_norm = NonLearnableLayerNorm(4, eps=1e-6).to(device_id)
 
     # Train!
     vla.train()
@@ -758,9 +786,9 @@ def distill(cfg: DistillConfig) -> None:
 
                         teacher_hidden = (teacher_hidden / 7.0) * 2.0 - 1.0  # normalize to [-1, 1]
                         # ========================================
-                        # APPLY NON-LEARNABLE BATCH NORMALIZATION TO TEACHER LATENT
+                        # APPLY NON-LEARNABLE LAYER NORMALIZATION TO TEACHER LATENT
                         # ========================================
-                        teacher_hidden = teacher_batch_norm(teacher_hidden)
+                        teacher_hidden = teacher_layer_norm(teacher_hidden)
 
                         # ========================================
                         # COMPUTE COMBINED LOSS
