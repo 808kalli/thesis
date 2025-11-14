@@ -73,8 +73,6 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
         nn.Tanh(),
     )
 
-    vla_model.distill_norm = nn.LayerNorm(projection_dim, eps=1e-6)  # learnable (affine=True by default)
-
     def get_projected_actions_from_batch(self, input_ids, attention_mask, pixel_values):
 
         output = self.forward(
@@ -114,7 +112,6 @@ def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64
 
         # === Project ===
         projected_actions = self.distill_projection(continuous_actions)
-        projected_actions = self.distill_norm(projected_actions)
 
         return projected_actions
 
@@ -184,25 +181,9 @@ class VLADistillDataset(Dataset):
     """
     
     def __init__(self, npy_dir: Path, processor):
-        all_paths = sorted(Path(npy_dir).glob("*.npy"))
-        if not all_paths:
+        self.paths = sorted(Path(npy_dir).glob("*.npy"))
+        if not self.paths:
             raise FileNotFoundError(f"No .npy files found in {npy_dir}")
-
-        # Filter out vectors where all 4 elements are the same (become 0 after layer norm)
-        self.paths = []
-        filtered_count = 0
-        for path in all_paths:
-            data = np.load(path, allow_pickle=True).item()
-            teacher_latent = np.array(data["teacher_latent"]).flatten()  # flatten to ensure 1D
-
-            # Keep vector only if not all elements are identical
-            if not (teacher_latent[0] == teacher_latent[1] == teacher_latent[2] == teacher_latent[3]):
-                self.paths.append(path)
-            else:
-                filtered_count += 1
-
-        print(f"Filtered out {filtered_count} teacher vectors with identical elements")
-        print(f"Keeping {len(self.paths)} valid teacher vectors out of {len(all_paths)}")
 
         self.processor = processor
 
@@ -772,23 +753,6 @@ def distill(cfg: DistillConfig) -> None:
     recent_contrast_losses = deque(maxlen=1)
 
     # Create non-learnable LayerNorm for teacher latents
-    class NonLearnableLayerNorm(nn.Module):
-        def __init__(self, normalized_shape, eps=1e-6):
-            super().__init__()
-            self.normalized_shape = normalized_shape
-            self.eps = eps
-
-        def forward(self, x):
-            return torch.nn.functional.layer_norm(
-                x,
-                normalized_shape=(x.shape[-1],),
-                weight=None,
-                bias=None,
-                eps=self.eps
-            )
-
-    teacher_layer_norm = NonLearnableLayerNorm(4, eps=1e-6).to(device_id)
-
     # Train!
     vla.train()
     optimizer.zero_grad()
@@ -810,10 +774,6 @@ def distill(cfg: DistillConfig) -> None:
                         teacher_hidden = batch["teacher_latent"].to(device_id)  # [batch, 4]
 
                         teacher_hidden = (teacher_hidden / 7.0) * 2.0 - 1.0  # normalize to [-1, 1]
-                        # ========================================
-                        # APPLY NON-LEARNABLE LAYER NORMALIZATION TO TEACHER LATENT
-                        # ========================================
-                        teacher_hidden = teacher_layer_norm(teacher_hidden)
 
                         # ========================================
                         # COMPUTE COMBINED LOSS
