@@ -7,7 +7,7 @@ logs/
 rollouts/
 lapa_latents/
 openvla_outputs/
-/SimplerEnv/
+/SimplerEnv-OpenVLA/
 
 # === Python + Runtime Artifacts ===
 __pycache__/
