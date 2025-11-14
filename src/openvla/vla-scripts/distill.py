@@ -193,7 +193,7 @@ class VLADistillDataset(Dataset):
         filtered_count = 0
         for path in all_paths:
             data = np.load(path, allow_pickle=True).item()
-            teacher_latent = np.array(data["teacher_latent"])
+            teacher_latent = np.array(data["teacher_latent"]).flatten()  # flatten to ensure 1D
 
             # Keep vector only if not all elements are identical
             if not (teacher_latent[0] == teacher_latent[1] == teacher_latent[2] == teacher_latent[3]):
