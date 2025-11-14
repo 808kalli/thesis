@@ -195,13 +195,13 @@ class VLADistillDataset(Dataset):
             data = np.load(path, allow_pickle=True).item()
             teacher_latent = np.array(data["teacher_latent"])
 
-            # Check if all 4 elements are the same (within small tolerance)
-            if not np.allclose(teacher_latent, teacher_latent[0]):
+            # Keep vector only if not all elements are identical
+            if not (teacher_latent[0] == teacher_latent[1] == teacher_latent[2] == teacher_latent[3]):
                 self.paths.append(path)
             else:
                 filtered_count += 1
 
-        print(f"Filtered out {filtered_count} teacher vectors with identical elements (would be 0 after layer norm)")
+        print(f"Filtered out {filtered_count} teacher vectors with identical elements")
         print(f"Keeping {len(self.paths)} valid teacher vectors out of {len(all_paths)}")
 
         self.processor = processor
