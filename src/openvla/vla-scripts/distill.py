@@ -464,32 +464,50 @@ def save_checkpoint(
     adapter_dir=None,
 ):
     """Save complete training state for resumption."""
+
+    # ------------------------------
+    # Unwrap DDP → Unwrap PEFT → Real HF model
+    # ------------------------------
+    base = vla.module                      # unwrap DDP
+    if hasattr(base, "base_model"):        # unwrap PEFT wrapper
+        base = base.base_model
+    if hasattr(base, "model"):             # unwrap HF model inside PEFT
+        base = base.model
+
+    model_to_save = base                   # <-- your distill layers live here
+
+    # ------------------------------
+    # Main process only
+    # ------------------------------
     if distributed_state.is_main_process:
         print(f"Saving Model Checkpoint for Step {gradient_step_idx}")
 
         # Save processor
         processor.save_pretrained(checkpoint_dir)
 
-        # If LoRA, save adapter weights to temporary directory
+        # Directory logic
         save_dir = adapter_dir if cfg.use_lora else checkpoint_dir
 
-        # Remove distillation layers before saving (only save vanilla OpenVLA weights)
-        model_to_save = vla.module
-        distill_projection = getattr(model_to_save, 'distill_projection', None)
-        distill_norm = getattr(model_to_save, 'distill_norm', None)
-        action_dim = getattr(model_to_save, 'action_dim', None)
+        # --------------------------------------------
+        # REMOVE distill layers BEFORE saving checkpoint
+        # --------------------------------------------
+        distill_projection = getattr(model_to_save, "distill_projection", None)
+        distill_norm = getattr(model_to_save, "distill_norm", None)
+        action_dim = getattr(model_to_save, "action_dim", None)
 
-        # Temporarily remove attributes
         if distill_projection is not None:
-            delattr(model_to_save, 'distill_projection')
+            delattr(model_to_save, "distill_projection")
         if distill_norm is not None:
-            delattr(model_to_save, 'distill_norm')
+            delattr(model_to_save, "distill_norm")
         if action_dim is not None:
-            delattr(model_to_save, 'action_dim')
+            delattr(model_to_save, "action_dim")
 
+        # Save pure OpenVLA + LoRA adapter
         model_to_save.save_pretrained(save_dir)
 
-        # Restore distillation layers for continued training
+        # --------------------------------------------
+        # RESTORE distill layers after saving
+        # --------------------------------------------
         if distill_projection is not None:
             model_to_save.distill_projection = distill_projection
         if distill_norm is not None:
@@ -497,35 +515,42 @@ def save_checkpoint(
         if action_dim is not None:
             model_to_save.action_dim = action_dim
 
-        # Save training state
+        # --------------------------------------------
+        # TRAINING STATE SAVE
+        # --------------------------------------------
         training_state = {
-            'gradient_step_idx': gradient_step_idx,
-            'batch_idx': batch_idx,
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'rng_state': torch.get_rng_state(),
-            'cuda_rng_state': [state.cpu() for state in torch.cuda.get_rng_state_all()],  # Move to CPU
+            "gradient_step_idx": gradient_step_idx,
+            "batch_idx": batch_idx,
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "rng_state": torch.get_rng_state(),
+            "cuda_rng_state": [state.cpu() for state in torch.cuda.get_rng_state_all()],
         }
         torch.save(training_state, checkpoint_dir / "training_state.pt")
 
-    # Wait for main process to finish saving
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
+    # Sync processes
+    if torch.distributed.is_initialized():
         dist.barrier()
 
-    # Merge LoRA weights into model backbone if using LoRA
+    # ------------------------------
+    # MERGE LORA WEIGHTS INTO BASE MODEL
+    # ------------------------------
     if cfg.use_lora:
-        vla = AutoModelForVision2Seq.from_pretrained(
-            cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
+        # Load clean base OpenVLA model
+        raw_model = AutoModelForVision2Seq.from_pretrained(
+            cfg.vla_path, torch_dtype=torch.bfloat16, trust_remote_code=True
         )
-        merged_vla = PeftModel.from_pretrained(vla, adapter_dir)
-        merged_vla = merged_vla.merge_and_unload()
-        
-        if distributed_state.is_main_process:
-            merged_vla.save_pretrained(checkpoint_dir)
-            print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {checkpoint_dir}")
 
-    # Block on main process checkpointing
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        # Load LoRA adapters
+        merged = PeftModel.from_pretrained(raw_model, adapter_dir)
+        merged = merged.merge_and_unload()
+
+        # Save merged vanilla OpenVLA
+        if distributed_state.is_main_process:
+            merged.save_pretrained(checkpoint_dir)
+            print(f"Merged & saved LoRA checkpoint at {checkpoint_dir}")
+
+    if torch.distributed.is_initialized():
         dist.barrier()
 
 
