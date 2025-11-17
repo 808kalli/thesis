@@ -695,7 +695,9 @@ class FlaxVideoLLaMAForCausalLM(FlaxVideoLLaMAPreTrainedModel):
 
         # The very first prompt often has sequence length > 1, so run outside of `lax.while_loop` to comply with TPU
         if input_ids.shape[1] > 1:
+            print(f"[OUTSIDE JIT] Running prefill with input_ids shape: {input_ids.shape}")
             state = sample_search_body_fn(state)
+            print(f"[OUTSIDE JIT] After prefill, state.cur_len: {state.cur_len}, state.running_token shape: {state.running_token.shape}")
 
         if not trace:
             state = self._run_loop_in_debug(sample_search_cond_fn, sample_search_body_fn, state)
