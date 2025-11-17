@@ -90,7 +90,7 @@ class ExtractLAPAConfig:
 
     # LAPA model parameters (same as inference.py)
     vqgan_checkpoint: str = "lapa_checkpoints/vqgan"
-    load_checkpoint: str = "params::lapa_checkpoints/params_sthv2"
+    load_checkpoint: str = "params::lapa_checkpoints/params"
     load_llama_config: str = "7b"
     update_llama_config: str = "dict(delta_vocab_size=8,sample_mode='text',theta=50000000,max_sequence_length=32768,scan_attention=False,scan_query_chunk_size=128,scan_key_chunk_size=128,scan_mlp=False,scan_mlp_chunk_size=8192,scan_layers=True)"
 
