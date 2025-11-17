@@ -468,7 +468,7 @@ class FlaxDeltaLaMAForCausalLMModule(nn.Module):
             delta_logits = self.delta_head(hidden_states)
 
         # Only print during generation (when sequence length is 1), not prefill
-        # jax.debug.print("Hidden states shape: {}, Delta logits shape: {}", hidden_states.shape, delta_logits.shape)
+        jax.debug.print("Hidden states shape: {}, Delta logits shape: {}", hidden_states.shape, delta_logits.shape)
 
         if self.config.sample_mode == 'all':
             if not return_dict:
@@ -595,12 +595,6 @@ class FlaxVideoLLaMAForCausalLM(FlaxVideoLLaMAPreTrainedModel):
             """state update fn."""
             prng_key, prng_key_next = jax.random.split(state.prng_key)
             model_outputs = model(state.running_token, params=params, **state.model_kwargs)
-
-            jax.debug.print(
-                "AR step (cur_len={}): hidden dim = {}", 
-                state.cur_len, 
-                model_outputs.hidden_states.shape
-            )
 
             logits = model_outputs.logits[:, -1]
 
