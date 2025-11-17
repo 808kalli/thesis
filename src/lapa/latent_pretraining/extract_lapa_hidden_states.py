@@ -10,13 +10,13 @@ The dataset is from HuggingFace (lerobot format, parquet files):
 https://huggingface.co/datasets/aopolin-lv/libero_spatial_no_noops_lerobot_v21
 
 Usage:
-    python latent_pretraining/extract_lapa_hidden_states.py \
-        --dataset_dir /workspace/thesis/raw_datasets/libero_spatial \
-        --output_dir /workspace/thesis \
-        --vqgan_checkpoint lapa_checkpoints/vqgan \
-        --load_checkpoint params::lapa_checkpoints/params_sthv2 \
-        --num_episodes 2 \
-        --seed 7
+python latent_pretraining/extract_lapa_hidden_states.py \
+    --dataset_dir /workspace/thesis/raw_datasets/libero_spatial \
+    --output_dir /workspace/thesis \
+    --vqgan_checkpoint lapa_checkpoints/vqgan \
+    --load_checkpoint params::lapa_checkpoints/params_sthv2 \
+    --num_episodes 1 \
+    --seed 7
 
 Arguments:
     --dataset_dir: Local path to libero_spatial dataset directory (HuggingFace parquet format)
@@ -408,19 +408,29 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
             frame_idx = 0
             while frame_idx < len(records):
                 try:
-                    # Extract frame from video at frame_idx
-                    cap = cv2.VideoCapture(str(video_path))
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                    ret, frame_bgr = cap.read()
-                    cap.release()
+                    # Extract frame from video at frame_idx using ffmpeg (supports AV1)
+                    import subprocess
 
-                    if not ret:
+                    # Use ffmpeg to extract frame at index
+                    cmd = [
+                        'ffmpeg',
+                        '-i', str(video_path),
+                        '-vf', f'select=eq(n\\,{frame_idx})',
+                        '-vframes', '1',
+                        '-f', 'image2pipe',
+                        '-pix_fmt', 'rgb24',
+                        '-'
+                    ]
+
+                    result = subprocess.run(cmd, capture_output=True, timeout=5)
+
+                    if result.returncode != 0:
                         frame_idx += cfg.frame_stride
                         continue
 
-                    # Convert BGR to RGB
-                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                    frame = Image.fromarray(frame_rgb, mode='RGB')
+                    # Convert bytes to PIL Image
+                    from io import BytesIO
+                    frame = Image.open(BytesIO(result.stdout)).convert('RGB')
 
                     # Extract hidden states [seq_len, 4096]
                     hidden_state = extractor.extract_hidden_state_from_image(frame, task_description)
