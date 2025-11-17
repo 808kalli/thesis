@@ -382,10 +382,8 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
                 task_description = None
 
             # Load video for this episode
-            # Videos are stored in {dataset_dir}/videos/chunk-XXX/episode_XXXXXX.mp4
+            # Videos are stored in {dataset_dir}/videos/chunk-XXX/observation.images.image/episode_XXXXXX.mp4
             import cv2
-            import os
-            from pathlib import Path
 
             video_path = None
             # Try to find video file for this episode
