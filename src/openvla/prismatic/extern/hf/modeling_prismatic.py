@@ -523,17 +523,17 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
         normalized_actions = self.bin_centers[discretized_actions]
 
-        # Unnormalize actions
-        action_norm_stats = self.get_action_stats(unnorm_key)
-        mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
-        action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
-        actions = np.where(
-            mask,
-            0.5 * (normalized_actions + 1) * (action_high - action_low) + action_low,
-            normalized_actions,
-        )
+        # # Unnormalize actions
+        # action_norm_stats = self.get_action_stats(unnorm_key)
+        # mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
+        # action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
+        # actions = np.where(
+        #     mask,
+        #     0.5 * (normalized_actions + 1) * (action_high - action_low) + action_low,
+        #     normalized_actions,
+        # )
 
-        return actions
+        return normalized_actions
 
     @staticmethod
     def _check_unnorm_key(norm_stats: Dict[str, Dict[str, Any]], unnorm_key: Optional[str]) -> str:

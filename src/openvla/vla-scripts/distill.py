@@ -20,7 +20,7 @@ Run with:
 Usage:
     torchrun --standalone --nnodes=1 --nproc-per-node=1 vla-scripts/distill.py \
         --batch_size 24 \
-        --learning_rate 1e-4 \
+        --learning_rate 1e-3 \
         --teacher_latent_dir /root/thesis/lapa_latents \
         --num_epochs 10 --save_every_n_epochs 1 \
         --contrastive_loss_type "kl_divergence" \
@@ -29,8 +29,6 @@ Usage:
 """
 
 import os
-import json
-import yaml
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,115 +40,165 @@ import torch
 import torch.distributed as dist
 import tqdm
 from accelerate import PartialState
-from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
-from transformers import AutoConfig, AutoImageProcessor, get_scheduler
-from PIL import Image
+from transformers import get_scheduler
 
 import wandb
 import torch.nn as nn
-from prismatic.extern.hf.configuration_prismatic import OpenVLAPConfig, OpenVLAConfig
-from prismatic.extern.hf.modeling_prismatic import OpenVLAPForActionPrediction, OpenVLAForActionPrediction
-from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
-from prismatic.util.data_utils import PaddedCollatorForActionPrediction
-from transformers import DataCollatorWithPadding
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
-def add_distillation_layers(vla_model, action_dim: int = 7, hidden_dim: int = 64, projection_dim: int = 4):
+# ============================================================
+# SEQUENCE ACTION ENCODER WITH CAUSAL ATTENTION
+# ============================================================
 
-    vla_model.action_dim = action_dim
+class SequenceActionEncoder(nn.Module):
+    """
+    Encodes a sequence of student actions to a 4D latent using causal self-attention.
 
-    vla_model.distill_projection = nn.Sequential(
-        nn.Linear(action_dim, hidden_dim),
-        nn.ReLU(),
-        nn.Linear(hidden_dim, projection_dim),
-        nn.Tanh(),
-    )
+    Input: [B, seq_len, 7] - sequence of student actions
+    Output: [B, 4] - encoded latent
+    """
+    def __init__(self, action_dim: int = 7, hidden_dim: int = 64, latent_dim: int = 4, num_heads: int = 4):
+        super().__init__()
 
-    def get_projected_actions_from_batch(self, input_ids, attention_mask, pixel_values):
+        self.action_dim = action_dim
+        self.hidden_dim = hidden_dim
+        self.latent_dim = latent_dim
+        self.num_heads = num_heads
 
-        output = self.forward(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            pixel_values=pixel_values,
-            labels=None,
+        # Project each action: 7 → hidden_dim
+        self.action_proj = nn.Linear(action_dim, hidden_dim)
+
+        # Causal self-attention
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            batch_first=True,
+            dropout=0.0
         )
 
-        # Extract action logits
-        action_logits = output.logits[
-            :, self.vision_backbone.featurizer.patch_embed.num_patches : -1
-        ]
-        action_logits = action_logits[:, -7:, :]  # [B, 7, vocab]
-
-        # === Differentiable argmax ===
-        tau = 1.0
-        action_soft = torch.nn.functional.gumbel_softmax(
-            action_logits, tau=tau, hard=False, dim=-1
-        )  # [B, 7, vocab]
-
-        # === Correct device ===
-        device = action_logits.device
-        vocab_size = action_logits.shape[-1]   # <-- IMPORTANT: true vocab size
-        num_bins = len(self.bin_centers)
-
-        bin_centers_tensor = torch.tensor(
-            self.bin_centers, device=device, dtype=torch.float32
+        # Final projection to latent: hidden_dim → latent_dim
+        self.latent_proj = nn.Sequential(
+            nn.Linear(hidden_dim, latent_dim),
+            nn.Tanh(),  # Keep latents in [-1, 1] to match teacher scale
         )
 
-        vocab_to_action = torch.zeros(vocab_size, device=device, dtype=torch.float32)
+    def forward(self, action_seq):
+        """
+        Args:
+            action_seq: [B, seq_len, 7] - sequence of actions
 
-        vocab_indices = vocab_size - 1 - torch.arange(num_bins, device=device)
-        vocab_to_action[vocab_indices] = bin_centers_tensor
+        Returns:
+            latent: [B, 4] - encoded latent
+        """
+        batch_size, seq_len, _ = action_seq.shape
 
-        continuous_actions = action_soft @ vocab_to_action
+        # Project actions to hidden dimension
+        x = self.action_proj(action_seq)  # [B, seq_len, hidden_dim]
 
-        # === Project ===
-        projected_actions = self.distill_projection(continuous_actions)
+        # Create causal mask (lower triangular, can only attend to current and past)
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=action_seq.device) * float('-inf'), diagonal=1)
 
-        return projected_actions
+        # Apply causal self-attention
+        attn_out, _ = self.attention(
+            x, x, x,
+            attn_mask=causal_mask,
+            need_weights=False
+        )  # [B, seq_len, hidden_dim]
 
-    vla_model.get_projected_actions_from_batch = get_projected_actions_from_batch.__get__(vla_model)
-    return vla_model
+        # Pool: take last token (it has seen the full sequence)
+        last_hidden = attn_out[:, -1, :]  # [B, hidden_dim]
 
+        # Project to latent
+        latent = self.latent_proj(last_hidden)  # [B, latent_dim]
+
+        return latent
+
+
+# ============================================================
+# AUTOENCODER FOR ACTION SPACE COMPRESSION
+# ============================================================
+
+class ActionAutoencoder(nn.Module):
+    """
+    Autoencoder that compresses sequences of 7D student actions to 4D latent space.
+
+    Encoder: Uses SequenceActionEncoder with causal attention on action sequences
+    Decoder: 4D (latent) → 128D (hidden) → 64D (hidden) → 7D (reconstruction with Tanh)
+    """
+    def __init__(self, action_dim: int = 7, hidden_dim: int = 64, latent_dim: int = 4):
+        super().__init__()
+
+        # Encoder: compress sequence of 7D actions → 4D latent using causal attention
+        self.encoder = SequenceActionEncoder(
+            action_dim=action_dim,
+            hidden_dim=hidden_dim,
+            latent_dim=latent_dim,
+            num_heads=4
+        )
+
+        # Decoder: reconstruct 4D → 7D (deeper and wider)
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, 128),  # Expand to 128
+            nn.ReLU(),
+            nn.Linear(128, 64),  # Further expand
+            nn.ReLU(),
+            nn.Linear(64, action_dim),
+            nn.Tanh(),  # Constrain output to [-1, 1] to match input action bounds
+        )
+
+    def encode(self, x):
+        """
+        Encode sequence of actions to 4D latent.
+
+        Args:
+            x: [B, seq_len, 7] sequence of student actions
+
+        Returns:
+            [B, 4] encoded latent
+        """
+        return self.encoder(x)
+
+    def decode(self, z):
+        """Decode 4D latent to 7D reconstruction."""
+        return self.decoder(z)
+
+    def forward(self, x):
+        """Full autoencoder pass: encode then decode."""
+        z = self.encode(x)
+        recon = self.decode(z)
+        return recon, z
 
 
 @dataclass
 class DistillConfig:
     # fmt: off
-    vla_path: str = "openvla/openvla-7b"                            # Path to OpenVLA model (on HuggingFace Hub)
 
     # Directory Paths
-    teacher_latent_dir: Path = Path("/root/thesis/lapa_latents")    # Path to LAPA latent directory
-    run_root_dir: Path = Path("runs")                               # Path to directory to store logs & checkpoints
-    adapter_tmp_dir: Path = Path("adapter-tmp")                     # Temporary directory for LoRA weights before fusing
+    teacher_latent_dir: Path = Path("/root/thesis/lapa_latents")    # Path to directory with student_inference_results.npy
 
-    # Distillation Parameters
-    batch_size: int = 64                                            # Distillation batch size
+    # Autoencoder Training Parameters
+    batch_size: int = 64                                            # Training batch size
     num_epochs: int = 10                                            # Number of epochs (full passes through dataset)
     save_every_n_epochs: int = 1                                    # Save checkpoint every N epochs
-    learning_rate: float = 1e-5                                     # Distillation learning rate
-    grad_accumulation_steps: int = 1                                # Gradient accumulation steps
+    learning_rate: float = 1e-3                                     # Autoencoder learning rate
     save_latest_checkpoint_only: bool = True                        # Whether to save only one checkpoint per run
 
-    # Distillation Loss Parameters
-    distill_loss_type: str = "mse"                                  # "mse" or "cosine"
+    # Autoencoder Architecture Parameters
+    ae_action_dim: int = 7                                          # Student action dimension
+    ae_hidden_dim: int = 64                                         # Encoder hidden dimension
+    ae_latent_dim: int = 4                                          # Latent dimension (matches teacher)
+
+    # Loss Parameters
+    distill_loss_type: str = "mse"                                  # "mse" or "cosine" for latent alignment
     distill_loss_weight: float = 0.5                                # Weight for embedding distillation loss
     contrastive_loss_weight: float = 1.0                            # Weight for contrastive loss
     contrastive_loss_type: str = "kl_divergence"                    # "similarity_structure", "kl_divergence", or "contrastive"
-    align_dim: int = 4                                               # LAPA's latent action dimension
-    align_hidden_dim: int = 64                                       # Hidden projection dimension (7 → 64 → 4)
-
-    # LoRA Arguments
-    use_lora: bool = True                                            # Whether to use LoRA fine-tuning
-    lora_rank: int = 32                                              # Rank of LoRA weight matrix
-    lora_dropout: float = 0.0                                        # Dropout applied to LoRA weights
-    use_quantization: bool = False                                   # Whether to 4-bit quantize VLA for LoRA fine-tuning
+    reconstruction_weight: float = 0.5                              # Weight for reconstruction loss
 
     # Scheduler Parameters
     lr_scheduler_type: str = "cosine"                                # Learning rate scheduler type
@@ -158,72 +206,16 @@ class DistillConfig:
     weight_decay: float = 1e-4                                       # Weight decay
     max_grad_norm: float = 1.0                                       # Max gradient norm for clipping
 
-    # Checkpoint Resumption
-    resume: bool = False                                             # Whether to resume from checkpoint
-    resume_from_checkpoint: Optional[Path] = None                    # Specific checkpoint path to resume from
-
     # Tracking Parameters
+    run_root_dir: Path = Path("runs")                               # Path to directory to store logs & checkpoints
     wandb_project: str = "openvla-distillation"                     # Name of W&B project to log to
     wandb_entity: str = "eliaskallioras"                            # Name of entity to log under
     run_id_note: Optional[str] = None                               # Extra note for logging, Weights & Biases
 
     # Other Parameters
     seed: int = 7                                                   # Random seed
-    hf_token: Union[str, Path] = Path(".hf_token")                  # Environment variable or Path to HF Token
 
     # fmt: on
-
-
-class VLADistillDataset(Dataset):
-    """
-    Loads .npy files and tokenizes prompts + processes images for distillation training.
-    Returns input_ids, pixel_values, and teacher_latent ready for VLA model.
-    """
-    
-    def __init__(self, npy_dir: Path, processor):
-        self.paths = sorted(Path(npy_dir).glob("*.npy"))
-        if not self.paths:
-            raise FileNotFoundError(f"No .npy files found in {npy_dir}")
-
-        self.processor = processor
-
-        # Import prompt builder (same as finetune.py)
-        from prismatic.models.backbones.llm.prompting import PurePromptBuilder
-        self.prompt_builder_fn = PurePromptBuilder
-
-    def __len__(self):
-        return len(self.paths)
-
-    def __getitem__(self, idx):
-        data = np.load(self.paths[idx], allow_pickle=True).item()
-        
-        # Load raw data
-        rgb = data["rgb"]  # Keep as numpy array for PIL conversion
-        prompt = data["prompt"]
-        teacher_latent = torch.tensor(data["teacher_latent"]).float()
-        
-        # Convert image to PIL (like RLDSBatchTransform does)
-        rgb_pil = Image.fromarray(rgb.astype(np.uint8))
-        
-        # Build prompt (same format as RLDSBatchTransform, but no action tokens)
-        prompt_builder = self.prompt_builder_fn("openvla")
-        prompt_builder.add_turn("human", f"What action should the robot take to {prompt.lower()}?")
-        prompt_text = prompt_builder.get_prompt()
-        
-        # Tokenize prompt (like RLDSBatchTransform does)
-        input_ids = self.processor.tokenizer(prompt_text, add_special_tokens=True).input_ids
-        input_ids = torch.tensor(input_ids)
-        
-        # Process image (like RLDSBatchTransform does)
-        pixel_values = self.processor.image_processor.apply_transform(rgb_pil)
-        
-        return {
-            "input_ids": input_ids,
-            "pixel_values": pixel_values, 
-            "teacher_latent": teacher_latent,
-            "video_id": data.get("video_id", self.paths[idx].stem.rsplit("_", 1)[0]),
-            "frame_number": data.get("frame_number", int(self.paths[idx].stem.rsplit("_", 1)[1])),
-        }
 
 
 # ============================================================
@@ -432,144 +424,63 @@ def combined_distill_loss(
     return total_loss, loss_dict
 
 
-def save_checkpoint(
-    vla,
-    optimizer,
-    scheduler,
-    gradient_step_idx,
-    batch_idx,
-    checkpoint_dir,
-    processor,
-    cfg,
-    distributed_state,
-    adapter_dir=None,
-):
-    """Save complete training state for resumption."""
+def autoencoder_distill_loss(
+    student_4d: torch.Tensor,
+    teacher_4d: torch.Tensor,
+    student_7d_sequence: torch.Tensor,
+    recon_7d: torch.Tensor,
+    embedding_weight: float = 0.5,
+    contrastive_weight: float = 1.0,
+    recon_weight: float = 0.5,
+    loss_type: str = "mse",
+    contrastive_type: str = "kl_divergence",
+) -> Tuple[torch.Tensor, dict]:
+    """
+    Combined autoencoder loss: latent alignment + reconstruction.
 
-    # ------------------------------
-    # Unwrap DDP → Unwrap PEFT → Real HF model
-    # ------------------------------
-    base = vla.module                      # unwrap DDP
-    if hasattr(base, "base_model"):        # unwrap PEFT wrapper
-        base = base.base_model
-    if hasattr(base, "model"):             # unwrap HF model inside PEFT
-        base = base.model
+    Args:
+        student_4d: [B, 4] encoded student latent (from sequence encoder)
+        teacher_4d: [B, 4] teacher latent actions
+        student_7d_sequence: [B, seq_len, 7] original student action sequence
+        recon_7d: [B, 7] reconstructed actions from autoencoder decoder
+        embedding_weight: weight for embedding distillation loss (latent alignment)
+        contrastive_weight: weight for contrastive loss (latent alignment)
+        recon_weight: weight for reconstruction loss
+        loss_type: type of embedding loss ("mse" or "cosine")
+        contrastive_type: type of contrastive loss
 
-    model_to_save = base                   # <-- your distill layers live here
+    Returns:
+        total_loss: weighted combination of latent alignment + reconstruction
+        loss_dict: individual loss components for logging
+    """
+    # Latent alignment loss (MSE + contrastive between student 4D encoded and teacher 4D)
+    latent_align_loss, latent_loss_dict = combined_distill_loss(
+        z_s=student_4d,  # [B, 4] encoded latent from sequence
+        z_t=teacher_4d,  # [B, 4] teacher latent
+        embedding_weight=embedding_weight,
+        contrastive_weight=contrastive_weight,
+        loss_type=loss_type,
+        contrastive_type=contrastive_type,
+    )
 
-    # ------------------------------
-    # Main process only
-    # ------------------------------
-    if distributed_state.is_main_process:
-        print(f"Saving Model Checkpoint for Step {gradient_step_idx}")
+    # Reconstruction loss: MSE between original sequence and reconstructed 7D actions
+    # Note: recon_7d is [B, 7] single action, student_7d_sequence is [B, seq_len, 7]
+    # We compare against the LAST action in the sequence (or mean of sequence)
+    student_sequence_mean = student_7d_sequence.mean(dim=1)  # [B, 7] - average action in sequence
+    recon_loss = torch.nn.functional.mse_loss(recon_7d, student_sequence_mean)
 
-        # Save processor
-        processor.save_pretrained(checkpoint_dir)
+    # Combine losses
+    total_loss = latent_align_loss + recon_weight * recon_loss
 
-        # Directory logic
-        save_dir = adapter_dir if cfg.use_lora else checkpoint_dir
+    loss_dict = {
+        "latent_align_loss": latent_align_loss.item(),
+        "embed_loss": latent_loss_dict["embed_loss"],
+        "contrast_loss": latent_loss_dict["contrast_loss"],
+        "recon_loss": recon_loss.item(),
+        "total_loss": total_loss.item(),
+    }
 
-        # --------------------------------------------
-        # REMOVE distill layers BEFORE saving checkpoint
-        # --------------------------------------------
-        distill_projection = getattr(model_to_save, "distill_projection", None)
-        distill_norm = getattr(model_to_save, "distill_norm", None)
-        action_dim = getattr(model_to_save, "action_dim", None)
-
-        if distill_projection is not None:
-            delattr(model_to_save, "distill_projection")
-        if distill_norm is not None:
-            delattr(model_to_save, "distill_norm")
-        if action_dim is not None:
-            delattr(model_to_save, "action_dim")
-
-        # Save pure OpenVLA + LoRA adapter
-        model_to_save.save_pretrained(save_dir)
-
-        # --------------------------------------------
-        # RESTORE distill layers after saving
-        # --------------------------------------------
-        if distill_projection is not None:
-            model_to_save.distill_projection = distill_projection
-        if distill_norm is not None:
-            model_to_save.distill_norm = distill_norm
-        if action_dim is not None:
-            model_to_save.action_dim = action_dim
-
-        # --------------------------------------------
-        # TRAINING STATE SAVE
-        # --------------------------------------------
-        training_state = {
-            "gradient_step_idx": gradient_step_idx,
-            "batch_idx": batch_idx,
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "rng_state": torch.get_rng_state(),
-            "cuda_rng_state": [state.cpu() for state in torch.cuda.get_rng_state_all()],
-        }
-        torch.save(training_state, checkpoint_dir / "training_state.pt")
-
-    # Sync processes
-    if torch.distributed.is_initialized():
-        dist.barrier()
-
-    # ------------------------------
-    # MERGE LORA WEIGHTS INTO BASE MODEL
-    # ------------------------------
-    if cfg.use_lora:
-        # Load clean base OpenVLA model
-        raw_model = AutoModelForVision2Seq.from_pretrained(
-            cfg.vla_path, torch_dtype=torch.bfloat16, trust_remote_code=True
-        )
-
-        # Load LoRA adapters
-        merged = PeftModel.from_pretrained(raw_model, adapter_dir)
-        merged = merged.merge_and_unload()
-
-        # Save merged vanilla OpenVLA
-        if distributed_state.is_main_process:
-            merged.save_pretrained(checkpoint_dir)
-            print(f"Merged & saved LoRA checkpoint at {checkpoint_dir}")
-
-    if torch.distributed.is_initialized():
-        dist.barrier()
-
-
-def load_checkpoint(checkpoint_dir, optimizer, scheduler, device_id, distributed_state):
-    """Load complete training state for resumption."""
-    training_state_path = checkpoint_dir / "training_state.pt"
-    
-    if not training_state_path.exists():
-        if distributed_state.is_main_process:
-            print(f"No training state found at {training_state_path}")
-        return None
-    
-    if distributed_state.is_main_process:
-        print(f"Loading training state from {training_state_path}")
-    
-    training_state = torch.load(training_state_path, map_location='cpu')  # Load to CPU first
-    
-    # Restore optimizer state
-    optimizer.load_state_dict(training_state['optimizer_state_dict'])
-    
-    # Restore scheduler state
-    scheduler.load_state_dict(training_state['scheduler_state_dict'])
-    
-    # Restore RNG states
-    torch.set_rng_state(training_state['rng_state'])
-    
-    # Restore CUDA RNG states - ensure they're ByteTensors
-    cuda_rng_states = training_state['cuda_rng_state']
-    if isinstance(cuda_rng_states, list):
-        # Convert to ByteTensor if needed and move to appropriate device
-        cuda_rng_states = [state.to(torch.uint8) if state.dtype != torch.uint8 else state 
-                          for state in cuda_rng_states]
-        torch.cuda.set_rng_state_all(cuda_rng_states)
-    
-    if distributed_state.is_main_process:
-        print(f"Resumed from gradient step {training_state['gradient_step_idx']}, batch {training_state['batch_idx']}")
-    
-    return training_state
+    return total_loss, loss_dict
 
 
 @draccus.wrap()
@@ -578,8 +489,8 @@ def distill(cfg: DistillConfig) -> None:
     print("\033[91m" + " "*15 + "Do or do not; there is no try." + "\033[0m")
     print("="*70 + "\n")
 
-    print(f"Distilling OpenVLAP Model using LAPA teacher latents")
-    print(f"Base model: {cfg.vla_path}")
+    print(f"Training Autoencoder for Action Space Distillation")
+    print(f"Using pre-computed student action sequences from distill_inference.py")
 
     # [Validate] Ensure GPU Available & Set Device / Distributed Context
     assert torch.cuda.is_available(), "Distillation assumes at least one GPU is available!"
@@ -592,147 +503,94 @@ def distill(cfg: DistillConfig) -> None:
     np.random.seed(cfg.seed)
 
     # Configure Unique Experiment ID & Log Directory
-    exp_id = f"openvlap-distill-b{cfg.batch_size}-lr{cfg.learning_rate}"
-    if cfg.use_lora:
-        exp_id += f"-lora-r{cfg.lora_rank}"
+    exp_id = f"ae-distill-b{cfg.batch_size}-lr{cfg.learning_rate}"
     if cfg.run_id_note is not None:
         exp_id += f"--{cfg.run_id_note}"
 
     # Start =>> Build Directories
-    run_dir, adapter_dir = cfg.run_root_dir / exp_id, cfg.adapter_tmp_dir / exp_id
+    run_dir = cfg.run_root_dir / exp_id
     os.makedirs(run_dir, exist_ok=True)
 
     # Initialize Logging =>> W&B
     if distributed_state.is_main_process:
-        wandb_id = f"distill+{exp_id}"
+        wandb_id = f"ae-distill+{exp_id}"
         wandb.init(
-            entity=cfg.wandb_entity, 
-            project=cfg.wandb_project, 
+            entity=cfg.wandb_entity,
+            project=cfg.wandb_project,
             name=wandb_id,
             id=None,
             resume=None,
         )
 
-    # Determine checkpoint directory for resumption
-    checkpoint_dir = cfg.resume_from_checkpoint if cfg.resume_from_checkpoint is not None else run_dir
+    # Load pre-computed student action sequences and teacher latents from distill_inference.py
+    print(f"\nLoading pre-computed student action sequences from {cfg.teacher_latent_dir}")
+    results_file = Path(cfg.teacher_latent_dir) / "student_inference_results.npy"
 
-    # Quantization Config =>> only if LoRA fine-tuning
-    quantization_config = None
-    if cfg.use_quantization:
-        assert cfg.use_lora, "Quantized training only supported for LoRA fine-tuning!"
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4"
+    if not results_file.exists():
+        raise FileNotFoundError(
+            f"Student inference results not found at {results_file}. "
+            f"Please run distill_inference.py first to generate student action sequences."
         )
 
-    # Register OpenVLA model to HF Auto Classes
-    AutoConfig.register("openvlap", OpenVLAPConfig)
-    AutoImageProcessor.register(OpenVLAPConfig, PrismaticImageProcessor)
-    AutoProcessor.register(OpenVLAPConfig, PrismaticProcessor)
-    AutoModelForVision2Seq.register(OpenVLAPConfig, OpenVLAPForActionPrediction)
+    results = np.load(results_file, allow_pickle=True).item()
+    student_actions_list = results["student_actions"]
+    teacher_latents_list = results["teacher_latents"]
+    video_ids_list = results["video_ids"]
 
-    # Load OpenVLA Processor and Model using HF AutoClasses
-    # If resuming, load from checkpoint; otherwise load from original model
-    model_path = checkpoint_dir if cfg.resume else cfg.vla_path
-    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    print(f"Loaded {len(student_actions_list)} pre-computed samples")
+    print(f"  Example student action seq shape: {student_actions_list[0].shape}")
+    print(f"  Example teacher latent shape: {teacher_latents_list[0].shape}")
 
-    vla = AutoModelForVision2Seq.from_pretrained(
-        model_path,
-        torch_dtype=torch.bfloat16,
-        quantization_config=quantization_config,
-        low_cpu_mem_usage=True,
-        trust_remote_code=True,
-    )
+    # Create simple dataset from pre-computed data
+    class PrecomputedDataset(torch.utils.data.Dataset):
+        def __init__(self, student_actions, teacher_latents):
+            # student_actions: list of [seq_len, 7] numpy arrays
+            # teacher_latents: list of [4] numpy arrays
+            self.student_actions = [torch.tensor(a, dtype=torch.float32) for a in student_actions]
+            self.teacher_latents = [torch.tensor(t, dtype=torch.float32) for t in teacher_latents]
 
-    # Add distillation layers with random initialization
-    vla = add_distillation_layers(
-        vla,
-        action_dim=7,
-        hidden_dim=cfg.align_hidden_dim,
-        projection_dim=cfg.align_dim,
-    )
+        def __len__(self):
+            return len(self.student_actions)
 
-    # Device Placement =>> note that BitsAndBytes automatically handles for quantized training
-    if cfg.use_quantization:
-        vla = prepare_model_for_kbit_training(vla)
-    else:
-        vla = vla.to(device_id)
+        def __getitem__(self, idx):
+            student_seq = self.student_actions[idx]  # [seq_len, 7]
+            teacher_latent = self.teacher_latents[idx]  # [4]
 
-    # Move new layers to device (if not using quantization)
-    if not cfg.use_quantization:
-        vla.distill_projection = vla.distill_projection.to(device_id)
+            # Ensure shapes are correct
+            assert student_seq.ndim == 2 and student_seq.shape[1] == 7, f"Expected [seq_len, 7], got {student_seq.shape}"
+            assert teacher_latent.ndim == 1 and teacher_latent.shape[0] == 4, f"Expected [4], got {teacher_latent.shape}"
 
-    # 🎯 FREEZING CONTROL POINT - finetune.py style with LoRA
-    print(f"use_lora: {cfg.use_lora}")
+            return {
+                "action_sequence": student_seq,  # [seq_len, 7]
+                "teacher_latent": teacher_latent,  # [4]
+            }
 
-    def get_lora_linear_targets(model):
-        target_layers = []
-        for name, module in model.named_modules():
-            if isinstance(module, nn.Linear):
-                # Skip TEMPORARY distill layers
-                if "distill_" in name:
-                    continue
-                target_layers.append(name.split(".")[-1])  # HF expects class names
-        return list(set(target_layers))
-
-    if cfg.use_lora:
-        linear_targets = get_lora_linear_targets(vla)
-        print("Using LoRA on:", linear_targets)
-
-        lora_config = LoraConfig(
-            r=cfg.lora_rank,
-            lora_alpha=min(cfg.lora_rank, 16),
-            lora_dropout=cfg.lora_dropout,
-            target_modules=linear_targets,
-            init_lora_weights="gaussian",
-        )
-
-        vla = get_peft_model(vla, lora_config)
-        vla.print_trainable_parameters()
-
-    # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
-    vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
-
-    # Load Distillation Dataset
-    dataset = VLADistillDataset(cfg.teacher_latent_dir, processor)
-
-    # Create Optimizer
-    trainable_params = [param for param in vla.parameters() if param.requires_grad]
-    optimizer = AdamW(trainable_params, lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
+    dataset = PrecomputedDataset(student_actions_list, teacher_latents_list)
 
     # Calculate total steps based on epochs and dataset size
     steps_per_epoch = len(dataset) // cfg.batch_size
     total_steps = cfg.num_epochs * steps_per_epoch
     warmup_steps = int(cfg.warmup_ratio * total_steps)
 
-    # Create Learning Rate Scheduler
-    scheduler = get_scheduler(
-        cfg.lr_scheduler_type,
-        optimizer=optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps,
-    )
+    def ae_collator(batch):
+        """Collator that handles variable-length action sequences for autoencoder."""
+        # Handle action sequences (pad to same length)
+        action_sequences = [item["action_sequence"] for item in batch]
+        max_seq_len = max(seq.shape[0] for seq in action_sequences)
 
-    def distill_collator(batch):
-        # Pad input_ids
-        input_ids = [item["input_ids"] for item in batch]
-        max_len = max(len(ids) for ids in input_ids)
-        
-        padded_input_ids = []
-        attention_masks = []
-        
-        for ids in input_ids:
-            pad_len = max_len - len(ids)
-            padded_ids = torch.cat([ids, torch.full((pad_len,), processor.tokenizer.pad_token_id)])
-            attention_mask = torch.cat([torch.ones(len(ids)), torch.zeros(pad_len)])
-            
-            padded_input_ids.append(padded_ids)
-            attention_masks.append(attention_mask)
-        
+        padded_actions = []
+        for seq in action_sequences:
+            if seq.shape[0] < max_seq_len:
+                # Pad with zeros to max_seq_len
+                pad_amount = max_seq_len - seq.shape[0]
+                padded_seq = torch.cat([seq, torch.zeros(pad_amount, 7)])
+                padded_actions.append(padded_seq)
+            else:
+                padded_actions.append(seq)
+
         return {
-            "input_ids": torch.stack(padded_input_ids),
-            "attention_mask": torch.stack(attention_masks),
-            "pixel_values": torch.stack([item["pixel_values"] for item in batch]),
-            "teacher_latent": torch.stack([item["teacher_latent"] for item in batch]),
+            "action_sequence": torch.stack(padded_actions),  # [B, max_seq_len, 7]
+            "teacher_latent": torch.stack([item["teacher_latent"] for item in batch]),  # [B, 4]
         }
 
     # Use the custom collator
@@ -740,21 +598,35 @@ def distill(cfg: DistillConfig) -> None:
         dataset,
         batch_size=cfg.batch_size,
         shuffle=True,
-        collate_fn=distill_collator,
+        collate_fn=ae_collator,
         num_workers=0,
     )
 
-    print(f"Loaded {len(dataset)} distillation samples with batch_size={cfg.batch_size}")
+    print(f"Loaded {len(dataset)} pre-computed samples for autoencoder training with batch_size={cfg.batch_size}")
 
     # Deque to store recent train metrics
     recent_losses = deque(maxlen=1)
     recent_embed_losses = deque(maxlen=1)
     recent_contrast_losses = deque(maxlen=1)
 
-    # Create non-learnable LayerNorm for teacher latents
-    # Train!
-    vla.train()
-    optimizer.zero_grad()
+    # Initialize autoencoder for action space compression
+    print(f"\nInitializing autoencoder...")
+    autoencoder = ActionAutoencoder(action_dim=7, hidden_dim=64, latent_dim=4).to(device_id)
+    print(f"Autoencoder initialized and moved to device {device_id}")
+
+    # Create optimizer for autoencoder only
+    ae_optimizer = AdamW(autoencoder.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
+    ae_scheduler = get_scheduler(
+        cfg.lr_scheduler_type,
+        optimizer=ae_optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps,
+    )
+
+    # Start training!
+    print(f"\nStarting autoencoder training for {cfg.num_epochs} epochs...")
+    autoencoder.train()
+    ae_optimizer.zero_grad()
     global_step = 0
 
     with tqdm.tqdm(total=cfg.num_epochs, desc="Overall Progress", leave=True, position=1) as epoch_progress:
@@ -764,25 +636,29 @@ def distill(cfg: DistillConfig) -> None:
 
                     with torch.autocast("cuda", dtype=torch.bfloat16):
 
-                        student_latent_projected = vla.module.get_projected_actions_from_batch(
-                            input_ids=batch["input_ids"].to(device_id),
-                            attention_mask=batch["attention_mask"].to(device_id),
-                            pixel_values=batch["pixel_values"].to(device_id),
-                        )
+                        # Get action sequence from batch [B, seq_len, 7]
+                        student_action_seq = batch["action_sequence"].to(device_id)
 
-                        teacher_hidden = batch["teacher_latent"].to(device_id)  # [batch, 4]
+                        # Autoencoder: encode sequence to 4D latent and reconstruct to 7D
+                        student_4d_encoded = autoencoder.encode(student_action_seq)  # [B, 4]
+                        student_7d_recon = autoencoder.decode(student_4d_encoded)  # [B, 7]
 
+                        # Get teacher latents
+                        teacher_hidden = batch["teacher_latent"].to(device_id)  # [B, 4]
                         teacher_hidden = (teacher_hidden / 7.0) * 2.0 - 1.0  # normalize to [-1, 1]
 
                         # ========================================
                         # COMPUTE COMBINED LOSS
                         # ========================================
 
-                        loss, loss_dict = combined_distill_loss(
-                            z_s=student_latent_projected,  # [batch, 4] - projected student actions
-                            z_t=teacher_hidden,             # [batch, 4] - teacher latent tokens
+                        loss, loss_dict = autoencoder_distill_loss(
+                            student_4d=student_4d_encoded,  # [B, 4] - encoded latent from sequence
+                            teacher_4d=teacher_hidden,  # [B, 4] - teacher latent tokens
+                            student_7d_sequence=student_action_seq,  # [B, seq_len, 7] - action sequence
+                            recon_7d=student_7d_recon,  # [B, 7] - reconstructed 7D action
                             embedding_weight=cfg.distill_loss_weight,
                             contrastive_weight=cfg.contrastive_loss_weight,
+                            recon_weight=0.5,  # Weight for reconstruction loss
                             loss_type=cfg.distill_loss_type,
                             contrastive_type=cfg.contrastive_loss_type
                         )
@@ -790,11 +666,12 @@ def distill(cfg: DistillConfig) -> None:
                     # Backward pass
                     loss.backward()
 
-                    # Optimizer Step
-                    torch.nn.utils.clip_grad_norm_(vla.parameters(), cfg.max_grad_norm)
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad()
+                    # Optimizer Step (autoencoder only)
+                    torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), cfg.max_grad_norm)
+
+                    ae_optimizer.step()
+                    ae_scheduler.step()
+                    ae_optimizer.zero_grad()
                     batch_progress.update()
 
                     # Store train metrics
@@ -816,40 +693,34 @@ def distill(cfg: DistillConfig) -> None:
                                 "total_loss": smoothened_loss,
                                 "embed_loss": smoothened_embed_loss,
                                 "contrast_loss": smoothened_contrast_loss,
-                                "learning_rate": scheduler.get_last_lr()[0],
+                                "learning_rate": ae_scheduler.get_last_lr()[0],
                             },
                             step=global_step,
                         )
 
-            # Save Model Checkpoint after each epoch
+            # Save Autoencoder Checkpoint after each epoch
             if (epoch + 1) % cfg.save_every_n_epochs == 0:
-                if cfg.save_latest_checkpoint_only:
-                    # Overwrite latest checkpoint
-                    save_checkpoint(
-                        vla, optimizer, scheduler, global_step, epoch,
-                        run_dir, processor, cfg,
-                        distributed_state, adapter_dir if cfg.use_lora else None
-                    )
-                else:
-                    # Save checkpoint in new directory
-                    checkpoint_dir_epoch = Path(str(run_dir) + f"--epoch{epoch+1}_chkpt")
-                    os.makedirs(checkpoint_dir_epoch, exist_ok=True)
+                if distributed_state.is_main_process:
+                    if cfg.save_latest_checkpoint_only:
+                        checkpoint_path = run_dir / "autoencoder_latest.pt"
+                    else:
+                        checkpoint_path = run_dir / f"autoencoder_epoch{epoch+1}.pt"
 
-                    adapter_dir_epoch = Path(str(adapter_dir) + f"--epoch{epoch+1}_chkpt") if cfg.use_lora else None
-                    if adapter_dir_epoch:
-                        os.makedirs(adapter_dir_epoch, exist_ok=True)
-
-                    save_checkpoint(
-                        vla, optimizer, scheduler, global_step, epoch,
-                        checkpoint_dir_epoch, processor, cfg,
-                        distributed_state, adapter_dir_epoch
-                    )
+                    torch.save({
+                        "epoch": epoch,
+                        "global_step": global_step,
+                        "autoencoder_state_dict": autoencoder.state_dict(),
+                        "optimizer_state_dict": ae_optimizer.state_dict(),
+                        "scheduler_state_dict": ae_scheduler.state_dict(),
+                    }, checkpoint_path)
+                    print(f"  Saved autoencoder checkpoint to {checkpoint_path}")
 
             epoch_progress.update()
 
-    print("Distillation Complete ✅")
+    print("\nAutoencoder Training Complete ✅")
     if distributed_state.is_main_process:
         wandb.finish()
+        print(f"Results saved to {run_dir}")
 
 
 if __name__ == "__main__":
