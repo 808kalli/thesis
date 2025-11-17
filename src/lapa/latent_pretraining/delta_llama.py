@@ -450,7 +450,7 @@ class FlaxDeltaLaMAForCausalLMModule(nn.Module):
         hidden_states = outputs[0]
 
         # Debug logging for hidden states
-        jax.debug.print("[FlaxDeltaLaMAModule] hidden_states shape: {}, sample_mode: {}", hidden_states.shape, self.config.sample_mode)
+        jax.debug.print("[FlaxDeltaLaMAModule] hidden_states shape: {}", hidden_states.shape)
         jax.debug.print("[FlaxDeltaLaMAModule] hidden_states last token shape: {}", hidden_states[:, -1, :].shape)
 
         if self.config.tie_vision_embeddings:
