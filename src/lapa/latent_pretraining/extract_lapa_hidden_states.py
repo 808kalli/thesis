@@ -245,19 +245,20 @@ class LAPAHiddenStateExtractor:
 
         with self.model.mesh:
             outputs = self.model.model.module.apply(
-                {"params": self.model.params},
+                {"params": self.model.params["params"]},
                 jnp.array(full_input_ids, dtype=jnp.int32),
                 jnp.array(vision_masks, dtype=jnp.bool_),
                 jnp.array(delta_masks, dtype=jnp.bool_),
                 jnp.array(full_attention_mask, dtype=jnp.int32),
-                None,  # segment_ids
-                None,  # position_ids (let model compute)
-                True,  # deterministic
-                False, # init_cache
-                False, # output_attentions
-                True,  # output_hidden_states
-                True,  # return_dict
+                None,   # segment_ids
+                None,   # position_ids
+                True,   # deterministic
+                False,  # init_cache
+                False,  # output_attentions
+                True,   # output_hidden_states
+                True,   # return_dict
             )
+
 
         # STEP 5: Extract vision token hidden states from final layer
         if hasattr(outputs, 'hidden_states') and outputs.hidden_states is not None:
