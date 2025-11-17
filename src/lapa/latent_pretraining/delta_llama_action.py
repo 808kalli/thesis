@@ -654,6 +654,8 @@ class FlaxVideoLLaMAForCausalLM(FlaxVideoLLaMAPreTrainedModel):
             if model_outputs.hidden_states is not None:
                 last_hidden_state = model_outputs.hidden_states[-1][:, -1, :]
                 print(f"Last hidden state shape: {last_hidden_state.shape}")
+            else:
+                print(f"Hidden states is None")
 
             # apply min_length, ...
             logits = logits_processor(state.sequences, logits, state.cur_len)
