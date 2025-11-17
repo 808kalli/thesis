@@ -240,14 +240,14 @@ class LAPAHiddenStateExtractor:
 
         # STEP 4: Run transformer forward pass
         # Source: sampler_latent_pretrain.py:154-158 _forward_generate()
-        # Instead of .generate() which discards hidden states, we call the model's apply method
+        # Call the model directly with parameters
         with self.model.mesh:
-            outputs = self.model.model.apply(
-                {'params': self.model.params},
+            outputs = self.model.model(
                 input_ids=full_input_ids,
                 vision_masks=vision_masks,
                 delta_masks=delta_masks,
                 attention_mask=full_attention_mask.astype(np.int32),
+                params=self.model.params,
                 output_hidden_states=True,
                 deterministic=True,
             )
