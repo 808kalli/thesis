@@ -648,22 +648,11 @@ class FlaxVideoLLaMAForCausalLM(FlaxVideoLLaMAPreTrainedModel):
         def sample_search_body_fn(state):
             """state update fn."""
             prng_key, prng_key_next = jax.random.split(state.prng_key)
-
-            # Debug: show state before calling model
-            jax.debug.print("BEFORE model call - cur_len: {}, running_token shape: {}", state.cur_len, state.running_token.shape)
-
             model_outputs = model(state.running_token, params=params, **state.model_kwargs)
 
-            jax.debug.print("AFTER model call - logits shape: {}, full hidden_states shape: {}", model_outputs.logits.shape, model_outputs.hidden_states[-1].shape if model_outputs.hidden_states is not None else "None")
+            jax.debug.print("Hidden states shape: {}, Delta logits shape: {}", model_outputs.hidden_states[-1].shape if model_outputs.hidden_states is not None else "None", model_outputs.logits.shape)
 
             logits = model_outputs.logits[:, -1]
-
-            # Debug: print hidden state shape (works inside JAX JIT)
-            if model_outputs.hidden_states is not None:
-                last_hidden_state = model_outputs.hidden_states[-1][:, -1, :]
-                jax.debug.print("Last hidden state shape: {}", last_hidden_state.shape)
-            else:
-                jax.debug.print("Hidden states is None")
 
             # apply min_length, ...
             logits = logits_processor(state.sequences, logits, state.cur_len)
@@ -695,9 +684,7 @@ class FlaxVideoLLaMAForCausalLM(FlaxVideoLLaMAPreTrainedModel):
 
         # The very first prompt often has sequence length > 1, so run outside of `lax.while_loop` to comply with TPU
         if input_ids.shape[1] > 1:
-            print(f"[OUTSIDE JIT] Running prefill with input_ids shape: {input_ids.shape}")
             state = sample_search_body_fn(state)
-            print(f"[OUTSIDE JIT] After prefill, state.cur_len: {state.cur_len}, state.running_token shape: {state.running_token.shape}")
 
         if not trace:
             state = self._run_loop_in_debug(sample_search_cond_fn, sample_search_body_fn, state)
