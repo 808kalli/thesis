@@ -650,8 +650,6 @@ class FlaxVideoLLaMAForCausalLM(FlaxVideoLLaMAPreTrainedModel):
             prng_key, prng_key_next = jax.random.split(state.prng_key)
             model_outputs = model(state.running_token, params=params, **state.model_kwargs)
 
-            jax.debug.print("Hidden states shape: {}, Delta logits shape: {}", model_outputs.hidden_states[-1].shape if model_outputs.hidden_states is not None else "None", model_outputs.logits.shape)
-
             logits = model_outputs.logits[:, -1]
 
             # apply min_length, ...
