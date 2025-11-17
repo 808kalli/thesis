@@ -648,8 +648,13 @@ class FlaxVideoLLaMAForCausalLM(FlaxVideoLLaMAPreTrainedModel):
         def sample_search_body_fn(state):
             """state update fn."""
             prng_key, prng_key_next = jax.random.split(state.prng_key)
+
+            # Debug: show state before calling model
+            jax.debug.print("BEFORE model call - cur_len: {}, running_token shape: {}", state.cur_len, state.running_token.shape)
+
             model_outputs = model(state.running_token, params=params, **state.model_kwargs)
 
+            jax.debug.print("AFTER model call - logits shape: {}, full hidden_states shape: {}", model_outputs.logits.shape, model_outputs.hidden_states[-1].shape if model_outputs.hidden_states is not None else "None")
 
             logits = model_outputs.logits[:, -1]
 
