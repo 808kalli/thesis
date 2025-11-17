@@ -189,8 +189,9 @@ class LAPAHiddenStateExtractor:
         # STEP 2: Create text prompt and tokenize
         # Source: sampler_latent_pretrain.py:218-221 __call__()
         # Format: "<s> <s> You are a helpful assistant. USER: What action should the robot take to `{question}` ASSISTANT: <vision>"
-        # We use the actual task description from the dataset if available
-        text_prompt = f"<s> <s> You are a helpful assistant. USER: What action should the robot take to {task_description} ASSISTANT: <vision>"
+        # We use the actual task description from the dataset if available, replacing underscores with spaces
+        task_desc_clean = task_description.replace('_', ' ') if task_description else 'action'
+        text_prompt = f"<s> <s> You are a helpful assistant. USER: What action should the robot take to {task_desc_clean} ASSISTANT: <vision>"
 
 
         # Tokenize using prefix_tokenizer (left-padding)
