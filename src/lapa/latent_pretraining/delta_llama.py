@@ -642,7 +642,7 @@ class FlaxVideoLLaMAForCausalLM(FlaxVideoLLaMAPreTrainedModel):
         cfg_scales: jnp.ndarray= 1.0,
         generation_config: Optional[GenerationConfig] = None,
         prng_key: Optional[jnp.ndarray] = None,
-        trace: bool = False,
+        trace: bool = True,
         params: Optional[Dict[str, jnp.ndarray]] = None,
         logits_processor: Optional[FlaxLogitsProcessorList] = None,
         **kwargs,

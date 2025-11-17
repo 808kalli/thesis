@@ -298,7 +298,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = True,
         output_projector_features: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, PrismaticCausalLMOutputWithPast]:

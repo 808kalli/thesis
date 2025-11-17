@@ -361,6 +361,8 @@ def finetune(cfg: FinetuneConfig) -> None:
                     labels=batch["labels"],
                 )
                 loss = output.loss
+                
+                print(f"Hidden states shape: {output.hidden_states.shape}")
 
             # Normalize loss to account for gradient accumulation
             normalized_loss = loss / cfg.grad_accumulation_steps
