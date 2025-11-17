@@ -239,17 +239,24 @@ class LAPAHiddenStateExtractor:
         ], axis=1)
 
         # STEP 4: Run transformer forward pass
-        # Source: sampler_latent_pretrain.py:154-158 _forward_generate()
-        # Call the model directly with parameters
+        # Call the model's module.apply() with parameters (Flax pattern)
+        # Source: delta_llama.py:410-448 for signature, delta_llama.py:499-500 for module_class
+        import jax.numpy as jnp
+
         with self.model.mesh:
-            outputs = self.model.model(
-                input_ids=full_input_ids,
-                vision_masks=vision_masks,
-                delta_masks=delta_masks,
-                attention_mask=full_attention_mask.astype(np.int32),
-                params=self.model.params,
-                output_hidden_states=True,
-                deterministic=True,
+            outputs = self.model.model.module.apply(
+                {"params": self.model.params},
+                jnp.array(full_input_ids, dtype=jnp.int32),
+                jnp.array(vision_masks, dtype=jnp.bool_),
+                jnp.array(delta_masks, dtype=jnp.bool_),
+                jnp.array(full_attention_mask, dtype=jnp.int32),
+                None,  # segment_ids
+                None,  # position_ids (let model compute)
+                True,  # deterministic
+                False, # init_cache
+                False, # output_attentions
+                True,  # output_hidden_states
+                True,  # return_dict
             )
 
         # STEP 5: Extract vision token hidden states from final layer
