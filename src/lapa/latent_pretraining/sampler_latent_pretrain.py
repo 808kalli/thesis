@@ -163,8 +163,13 @@ class DeltaSampler:
                     min_new_tokens=n_tokens,
                     pad_token_id=self.tokenizer.pad_token_id,
                     eos_token_id=self.tokenizer.eos_token_id,
+                    output_hidden_states=True,
                 )
-            ).sequences
+            )
+            # Log hidden states if available
+            if hasattr(text_output, 'hidden_states') and text_output.hidden_states is not None:
+                jax.debug.print("Hidden states available, shape: {}", jnp.array(text_output.hidden_states[-1]).shape if text_output.hidden_states else "None")
+            text_output = text_output.sequences
             delta_output= text_output[:,batch['input_ids'].shape[1]:]
             return delta_output, rng_generator()
         return pjit(

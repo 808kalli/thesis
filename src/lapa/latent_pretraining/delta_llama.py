@@ -449,6 +449,10 @@ class FlaxDeltaLaMAForCausalLMModule(nn.Module):
 
         hidden_states = outputs[0]
 
+        # Debug logging for hidden states
+        jax.debug.print("[FlaxDeltaLaMAModule] hidden_states shape: {}, sample_mode: {}", hidden_states.shape, self.config.sample_mode)
+        jax.debug.print("[FlaxDeltaLaMAModule] hidden_states last token shape: {}", hidden_states[:, -1, :].shape)
+
         if self.config.tie_vision_embeddings:
             shared_kernel = self.transformer.variables["params"]["vte"]["embedding"].T
             vision_logits = self.vision_head.apply({"params": {"kernel": shared_kernel}}, hidden_states)
@@ -460,12 +464,14 @@ class FlaxDeltaLaMAForCausalLMModule(nn.Module):
             lm_logits = self.lm_head.apply({"params": {"kernel": shared_kernel}}, hidden_states)
         else:
             lm_logits = self.lm_head(hidden_states)
-        
+
         if self.config.tie_vision_embeddings:
             shared_kernel = self.transformer.variables["params"]["dte"]["embedding"].T
             delta_logits = self.delta_head.apply({"params": {"kernel": shared_kernel}}, hidden_states)
         else:
             delta_logits = self.delta_head(hidden_states)
+
+        jax.debug.print("[FlaxDeltaLaMAModule] delta_logits shape: {}", delta_logits.shape)
     
         if self.config.sample_mode == 'all':
             if not return_dict:
