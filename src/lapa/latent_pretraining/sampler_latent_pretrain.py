@@ -176,7 +176,8 @@ class DeltaSampler:
 
     
     def generate_video_pred(self, prompts, images, max_input_length):
-        
+        print(f"[DeltaSampler.generate_video_pred] Called with {len(prompts)} prompts, images shape: {images.shape}")
+
         sharded_rng = next_rng()
         inputs = self.prefix_tokenizer(
             prompts,
@@ -205,19 +206,25 @@ class DeltaSampler:
                 np.zeros(inputs_for_gen.input_ids.shape, dtype=bool),
             ], axis=1),
         )
-
+        print(f"[DeltaSampler.generate_video_pred] About to call _forward_generate with batch input_ids shape: {batch['input_ids'].shape}")
         with self.mesh:
             delta_output, sharded_rng = self._forward_generate(
-                self.params, sharded_rng, batch, 
+                self.params, sharded_rng, batch,
                 self.FLAGS.tokens_per_delta
             )
+            print(f"[DeltaSampler.generate_video_pred] _forward_generate returned output shape: {delta_output.shape}")
             delta_output = jax.device_get(delta_output)
+            print(f"[DeltaSampler.generate_video_pred] After device_get, delta_output: {delta_output}")
             
         return delta_output,
 
     def __call__(self, prompts):
+        print(f"[DeltaSampler] Starting inference with {len(prompts)} prompts")
         batch = self.construct_input(prompts)
+        print(f"[DeltaSampler] Input batch shape: {batch['input_ids'].shape}")
         text_prompt = f"<s> <s> You are a helpful assistant. USER: What action should the robot take to `{prompts[0]['question']}` ASSISTANT: <vision>"
+        print(f"[DeltaSampler] Calling generate_video_pred...")
         latent_output = self.generate_video_pred(prompts=[text_prompt], images=batch['input_ids'], max_input_length=128)
+        print(f"[DeltaSampler] latent_output: {latent_output}")
         return latent_output
         
