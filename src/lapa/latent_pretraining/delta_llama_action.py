@@ -598,6 +598,9 @@ class FlaxVideoLLaMAForCausalLM(FlaxVideoLLaMAPreTrainedModel):
         params: Optional[Dict[str, jnp.ndarray]] = None,
         model_kwargs: Optional[Dict[str, jnp.ndarray]] = None,
     ):
+        # Print at the start, before JAX tracing
+        print(f"_sample_vision called with input_ids shape: {input_ids.shape if hasattr(input_ids, 'shape') else type(input_ids)}")
+
         # init values
         max_length = max_length if max_length is not None else self.generation_config.max_length
         pad_token_id = pad_token_id if pad_token_id is not None else self.generation_config.pad_token_id
@@ -650,12 +653,12 @@ class FlaxVideoLLaMAForCausalLM(FlaxVideoLLaMAPreTrainedModel):
 
             logits = model_outputs.logits[:, -1]
 
-            # Print last hidden state shape
+            # Debug: print hidden state shape (works inside JAX JIT)
             if model_outputs.hidden_states is not None:
                 last_hidden_state = model_outputs.hidden_states[-1][:, -1, :]
-                print(f"Last hidden state shape: {last_hidden_state.shape}")
+                jax.debug.print("Last hidden state shape: {}", last_hidden_state.shape)
             else:
-                print(f"Hidden states is None")
+                jax.debug.print("Hidden states is None")
 
             # apply min_length, ...
             logits = logits_processor(state.sequences, logits, state.cur_len)
