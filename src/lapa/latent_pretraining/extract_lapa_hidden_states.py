@@ -381,21 +381,48 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
                 print(f"\n  ⚠️  Task index {task_index} out of range, using generic prompt")
                 task_description = None
 
+            # Load video for this episode
+            # Videos are stored in {dataset_dir}/videos/chunk-XXX/episode_XXXXXX.mp4
+            import cv2
+            import os
+            from pathlib import Path
+
+            video_path = None
+            # Try to find video file for this episode
+            # Videos are at: {dataset_dir}/videos/chunk-XXX/observation.images.image/episode_XXXXXX.mp4
+            videos_dir = dataset_dir / 'videos'
+            if videos_dir.exists():
+                for chunk_dir in sorted(videos_dir.glob('chunk-*')):
+                    # Try the standard image directory
+                    image_dir = chunk_dir / 'observation.images.image'
+                    if image_dir.exists():
+                        potential_video = image_dir / f'episode_{episode_idx:06d}.mp4'
+                        if potential_video.exists():
+                            video_path = potential_video
+                            break
+
+            if not video_path:
+                print(f"\n  ⚠️  Video not found for episode {episode_idx}")
+                failed_count += 1
+                continue
+
             # Process frames at stride: 0, 12, 24, ...
             frame_idx = 0
             while frame_idx < len(records):
                 try:
-                    record = records[frame_idx]
-                    image_array = record['observation']['images']['image']  # Already numpy array
+                    # Extract frame from video at frame_idx
+                    cap = cv2.VideoCapture(str(video_path))
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                    ret, frame_bgr = cap.read()
+                    cap.release()
 
-                    # Convert to PIL Image (handle different formats)
-                    if isinstance(image_array, bytes):
-                        # If encoded as bytes, decode first
-                        import io
-                        frame = Image.open(io.BytesIO(image_array)).convert('RGB')
-                    else:
-                        # If already array
-                        frame = Image.fromarray(np.uint8(image_array), mode='RGB')
+                    if not ret:
+                        frame_idx += cfg.frame_stride
+                        continue
+
+                    # Convert BGR to RGB
+                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                    frame = Image.fromarray(frame_rgb, mode='RGB')
 
                     # Extract hidden states [seq_len, 4096]
                     hidden_state = extractor.extract_hidden_state_from_image(frame, task_description)
