@@ -11,12 +11,12 @@ https://huggingface.co/datasets/aopolin-lv/libero_spatial_no_noops_lerobot_v21
 
 Usage:
     python latent_pretraining/extract_lapa_hidden_states.py \
-        --dataset_dir /path/to/libero_spatial \
-        --output_dir /path/to/lapa_hidden_states \
+        --dataset_dir /workspace/thesis/raw_datasets/libero_spatial \
+        --output_dir /workspace/thesis \
         --vqgan_checkpoint lapa_checkpoints/vqgan \
         --load_checkpoint params::lapa_checkpoints/params_sthv2 \
-        --num_episodes 100 \
-        --seed 42
+        --num_episodes 2 \
+        --seed 7
 
 Arguments:
     --dataset_dir: Local path to libero_spatial dataset directory (HuggingFace parquet format)
@@ -312,15 +312,28 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     print(f"\nLoading dataset from: {dataset_dir}")
     try:
         from datasets import load_dataset
+        import glob
 
-        # Load the dataset in streaming mode to avoid memory issues
+        # Find all parquet files in the data chunks directory
+        data_dir = dataset_dir / 'data'
+        parquet_files = sorted(glob.glob(str(data_dir / '**' / '*.parquet'), recursive=True))
+
+        if not parquet_files:
+            print(f"❌ No parquet files found in {data_dir}")
+            return
+
+        print(f"Found {len(parquet_files)} parquet files")
+
+        # Load the dataset from parquet files
         dataset = load_dataset(
             'parquet',
-            data_files={
-                'train': str(dataset_dir / 'data' / '**' / '*.parquet')
-            },
-            split='train',
+            data_files=parquet_files,
         )
+
+        # If dataset is a DatasetDict, get the train split
+        if hasattr(dataset, 'keys'):
+            dataset = dataset['train']
+
         print(f"✓ Loaded dataset with {len(dataset)} total records")
     except Exception as e:
         print(f"⚠️  Could not load dataset: {e}")
