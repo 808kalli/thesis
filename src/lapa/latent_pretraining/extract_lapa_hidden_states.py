@@ -361,7 +361,7 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
 
     print(f"✓ Found {len(episodes)} episodes")
 
-    # Process episodes
+    # Process episodes with incremental saving every 10 episodes
     hidden_states_list = []
     episode_indices_list = []
     frame_indices_list = []
@@ -369,8 +369,11 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     seq_lengths_list = []
     failed_count = 0
     extracted_count = 0
+    batch_count = 0
+    save_interval = 10  # Save every N episodes
 
     print(f"\nExtracting hidden states (sampling every {cfg.frame_stride} frames)...")
+    print(f"(Auto-saving every {save_interval} episodes to manage RAM)")
 
     episode_list = sorted(episodes.items())
     if cfg.num_episodes is not None:
@@ -378,7 +381,7 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
 
     pbar = tqdm.tqdm(total=len(episode_list), desc="Episodes")
 
-    for episode_idx, records in episode_list:
+    for episode_count, (episode_idx, records) in enumerate(episode_list, 1):
         pbar.update(1)
 
         try:
@@ -468,50 +471,83 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
             failed_count += 1
             continue
 
+        # Incremental save every N episodes to manage RAM
+        if episode_count % save_interval == 0 and hidden_states_list:
+            batch_count += 1
+            output_file = output_dir / "lapa_hidden_states.npy"
+
+            hidden_states = np.array(hidden_states_list, dtype=object)
+            episode_indices = np.array(episode_indices_list, dtype=np.int32)
+            frame_indices = np.array(frame_indices_list, dtype=np.int32)
+            seq_lengths = np.array(seq_lengths_list, dtype=np.int32)
+            task_descriptions = np.array(task_descriptions_list, dtype=object)
+
+            # Load existing data if file exists, append new data
+            if output_file.exists():
+                existing = np.load(output_file, allow_pickle=True).item()
+                hidden_states = np.concatenate([existing["hidden_states"], hidden_states], dtype=object)
+                episode_indices = np.concatenate([existing["episode_indices"], episode_indices])
+                frame_indices = np.concatenate([existing["frame_indices"], frame_indices])
+                seq_lengths = np.concatenate([existing["seq_lengths"], seq_lengths])
+                task_descriptions = np.concatenate([existing["task_descriptions"], task_descriptions])
+
+            results = {
+                "hidden_states": hidden_states,
+                "episode_indices": episode_indices,
+                "frame_indices": frame_indices,
+                "seq_lengths": seq_lengths,
+                "task_descriptions": task_descriptions,
+            }
+            np.save(output_file, results, allow_pickle=True)
+            print(f"\n✅ Batch {batch_count} saved: {len(hidden_states)} total samples accumulated to {output_file.name}")
+
+            # Clear lists to free RAM
+            hidden_states_list = []
+            episode_indices_list = []
+            frame_indices_list = []
+            task_descriptions_list = []
+            seq_lengths_list = []
+
     pbar.close()
 
-    if not hidden_states_list:
-        print("❌ No hidden states extracted!")
-        return
+    # Save any remaining data
+    if hidden_states_list:
+        batch_count += 1
+        output_file = output_dir / "lapa_hidden_states.npy"
 
-    # Store results with variable sequence lengths
-    hidden_states = np.array(hidden_states_list, dtype=object)
-    episode_indices = np.array(episode_indices_list, dtype=np.int32)
-    frame_indices = np.array(frame_indices_list, dtype=np.int32)
-    seq_lengths = np.array(seq_lengths_list, dtype=np.int32)
-    task_descriptions = np.array(task_descriptions_list, dtype=object)
+        hidden_states = np.array(hidden_states_list, dtype=object)
+        episode_indices = np.array(episode_indices_list, dtype=np.int32)
+        frame_indices = np.array(frame_indices_list, dtype=np.int32)
+        seq_lengths = np.array(seq_lengths_list, dtype=np.int32)
+        task_descriptions = np.array(task_descriptions_list, dtype=object)
+
+        # Load existing data if file exists, append new data
+        if output_file.exists():
+            existing = np.load(output_file, allow_pickle=True).item()
+            hidden_states = np.concatenate([existing["hidden_states"], hidden_states], dtype=object)
+            episode_indices = np.concatenate([existing["episode_indices"], episode_indices])
+            frame_indices = np.concatenate([existing["frame_indices"], frame_indices])
+            seq_lengths = np.concatenate([existing["seq_lengths"], seq_lengths])
+            task_descriptions = np.concatenate([existing["task_descriptions"], task_descriptions])
+
+        results = {
+            "hidden_states": hidden_states,
+            "episode_indices": episode_indices,
+            "frame_indices": frame_indices,
+            "seq_lengths": seq_lengths,
+            "task_descriptions": task_descriptions,
+        }
+        np.save(output_file, results, allow_pickle=True)
+        print(f"\n✅ Final batch saved: {len(hidden_states)} total samples to {output_file.name}")
 
     print(f"\n{'='*70}")
     print(f"✅ Extraction Complete")
     print(f"{'='*70}")
     print(f"Successfully extracted: {extracted_count} hidden states")
     print(f"Failed samples: {failed_count}")
-    print(f"\nData summary:")
-    print(f"  - Number of samples: {len(hidden_states)}")
-    print(f"  - Sequence length range: {seq_lengths.min()} to {seq_lengths.max()}")
-    print(f"  - Average sequence length: {seq_lengths.mean():.1f}")
-    print(f"  - Unique tasks: {len(set(task_descriptions))}")
-
-    # Save results
-    output_file = output_dir / "lapa_hidden_states.npy"
-    results = {
-        "hidden_states": hidden_states,
-        "episode_indices": episode_indices,
-        "frame_indices": frame_indices,
-        "seq_lengths": seq_lengths,
-        "task_descriptions": task_descriptions,
-    }
-    np.save(output_file, results, allow_pickle=True)
-    print(f"\n✅ Saved to: {output_file}")
-
-    # Statistics
-    all_hidden_states_concat = np.vstack([hs for hs in hidden_states])
-    print(f"\nHidden state statistics:")
-    print(f"  - Total vectors: {len(all_hidden_states_concat)}")
-    print(f"  - Min: {all_hidden_states_concat.min():.6f}")
-    print(f"  - Max: {all_hidden_states_concat.max():.6f}")
-    print(f"  - Mean: {all_hidden_states_concat.mean():.6f}")
-    print(f"  - Std: {all_hidden_states_concat.std():.6f}")
+    print(f"\nSaved to: {output_dir}/lapa_hidden_states.npy")
+    print(f"  - Total samples: {len(hidden_states)}")
+    print(f"  - Contains: hidden_states, episode_indices, frame_indices, seq_lengths, task_descriptions")
 
 
 if __name__ == "__main__":
