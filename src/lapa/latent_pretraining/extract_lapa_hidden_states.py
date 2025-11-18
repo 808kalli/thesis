@@ -317,49 +317,44 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     print("Initializing LAPA...")
     extractor = LAPAHiddenStateExtractor(cfg)
 
-    # Load dataset using datasets library
-    print(f"\nLoading dataset from: {dataset_dir}")
-    try:
-        from datasets import load_dataset
-        import glob
+    # Find parquet files without loading entire dataset
+    print(f"\nDiscovering dataset structure from: {dataset_dir}")
+    import glob
+    import pandas as pd
 
-        # Find all parquet files in the data chunks directory
-        data_dir = dataset_dir / 'data'
-        parquet_files = sorted(glob.glob(str(data_dir / '**' / '*.parquet'), recursive=True))
+    data_dir = dataset_dir / 'data'
+    parquet_files = sorted(glob.glob(str(data_dir / '**' / '*.parquet'), recursive=True))
 
-        if not parquet_files:
-            print(f"❌ No parquet files found in {data_dir}")
-            return
-
-        print(f"Found {len(parquet_files)} parquet files")
-
-        # Load the dataset from parquet files
-        dataset = load_dataset(
-            'parquet',
-            data_files=parquet_files,
-        )
-
-        # If dataset is a DatasetDict, get the train split
-        if hasattr(dataset, 'keys'):
-            dataset = dataset['train']
-
-        print(f"✓ Loaded dataset with {len(dataset)} total records")
-    except Exception as e:
-        print(f"⚠️  Could not load dataset: {e}")
-        print(f"  Please ensure the dataset is downloaded from:")
-        print(f"  https://huggingface.co/datasets/aopolin-lv/libero_spatial_no_noops_lerobot_v21")
+    if not parquet_files:
+        print(f"❌ No parquet files found in {data_dir}")
         return
 
-    # Group records by episode
-    print(f"\nGrouping records by episode...")
-    episodes = {}
-    for record in dataset:
-        episode_idx = int(record['episode_index'])
-        if episode_idx not in episodes:
-            episodes[episode_idx] = []
-        episodes[episode_idx].append(record)
+    print(f"Found {len(parquet_files)} parquet files")
 
-    print(f"✓ Found {len(episodes)} episodes")
+    # Build episode index by reading parquet files in streaming mode
+    print(f"\nBuilding episode index (streaming)...")
+    episodes_metadata = {}  # episode_idx -> (parquet_file, row_indices, num_frames)
+    total_records = 0
+
+    for parquet_file in parquet_files:
+        # Read only episode_index and task_index columns to build index
+        df = pd.read_parquet(parquet_file, columns=['episode_index', 'task_index'])
+        for idx, row in df.iterrows():
+            episode_idx = int(row['episode_index'])
+            task_idx = int(row['task_index'])
+            if episode_idx not in episodes_metadata:
+                episodes_metadata[episode_idx] = {
+                    'parquet_file': parquet_file,
+                    'indices': [],
+                    'task_index': task_idx,
+                    'num_frames': 0
+                }
+            episodes_metadata[episode_idx]['indices'].append(idx)
+            episodes_metadata[episode_idx]['num_frames'] += 1
+            total_records += 1
+        del df  # Explicitly delete to free memory
+
+    print(f"✓ Found {len(episodes_metadata)} episodes with {total_records} total records")
 
     # Process episodes with incremental saving every 10 episodes
     hidden_states_list = []
@@ -375,35 +370,31 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     print(f"\nExtracting hidden states (sampling every {cfg.frame_stride} frames)...")
     print(f"(Auto-saving every {save_interval} episodes to manage RAM)")
 
-    episode_list = sorted(episodes.items())
+    episode_list = sorted(episodes_metadata.items())
     if cfg.num_episodes is not None:
         episode_list = episode_list[:cfg.num_episodes]
 
     pbar = tqdm.tqdm(total=len(episode_list), desc="Episodes")
 
-    for episode_count, (episode_idx, records) in enumerate(episode_list, 1):
+    for episode_count, (episode_idx, episode_meta) in enumerate(episode_list, 1):
         pbar.update(1)
 
         try:
-            # Get task description from first record
-            task_index = int(records[0]['task_index'])
+            # Get task description from metadata (no record loading needed)
+            task_index = episode_meta['task_index']
+            num_frames = episode_meta['num_frames']
+
             if task_index < len(LIBERO_SPATIAL_TASKS):
                 task_description = LIBERO_SPATIAL_TASKS[task_index]
             else:
                 print(f"\n  ⚠️  Task index {task_index} out of range, using generic prompt")
                 task_description = None
 
-            # Load video for this episode
-            # Videos are stored in {dataset_dir}/videos/chunk-XXX/observation.images.image/episode_XXXXXX.mp4
-            import cv2
-
+            # Find video file for this episode
             video_path = None
-            # Try to find video file for this episode
-            # Videos are at: {dataset_dir}/videos/chunk-XXX/observation.images.image/episode_XXXXXX.mp4
             videos_dir = dataset_dir / 'videos'
             if videos_dir.exists():
                 for chunk_dir in sorted(videos_dir.glob('chunk-*')):
-                    # Try the standard image directory
                     image_dir = chunk_dir / 'observation.images.image'
                     if image_dir.exists():
                         potential_video = image_dir / f'episode_{episode_idx:06d}.mp4'
@@ -418,7 +409,7 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
 
             # Process frames at stride: 0, 12, 24, ...
             frame_idx = 0
-            while frame_idx < len(records):
+            while frame_idx < num_frames:
                 try:
                     # Extract frame from video at frame_idx using ffmpeg (supports AV1)
                     import subprocess
@@ -474,32 +465,41 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
         # Incremental save every N episodes to manage RAM
         if episode_count % save_interval == 0 and hidden_states_list:
             batch_count += 1
-            output_file = output_dir / "lapa_hidden_states.npy"
+            output_file = output_dir / "lapa_hidden_states.h5"
 
-            hidden_states = np.array(hidden_states_list, dtype=object)
-            episode_indices = np.array(episode_indices_list, dtype=np.int32)
-            frame_indices = np.array(frame_indices_list, dtype=np.int32)
-            seq_lengths = np.array(seq_lengths_list, dtype=np.int32)
-            task_descriptions = np.array(task_descriptions_list, dtype=object)
+            try:
+                import h5py
+            except ImportError:
+                print("❌ h5py not installed. Install with: pip install h5py")
+                return
 
-            # Load existing data if file exists, append new data
-            if output_file.exists():
-                existing = np.load(output_file, allow_pickle=True).item()
-                hidden_states = np.concatenate([existing["hidden_states"], hidden_states], dtype=object)
-                episode_indices = np.concatenate([existing["episode_indices"], episode_indices])
-                frame_indices = np.concatenate([existing["frame_indices"], frame_indices])
-                seq_lengths = np.concatenate([existing["seq_lengths"], seq_lengths])
-                task_descriptions = np.concatenate([existing["task_descriptions"], task_descriptions])
+            # Append to HDF5 file (much more efficient than numpy object arrays)
+            with h5py.File(output_file, 'a') as f:
+                # Create datasets if they don't exist
+                if 'hidden_states' not in f:
+                    # Create resizable datasets
+                    f.create_dataset('hidden_states', (0, 4096), maxshape=(None, 4096), dtype=np.float32, chunks=True)
+                    f.create_dataset('episode_indices', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
+                    f.create_dataset('frame_indices', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
+                    f.create_dataset('seq_lengths', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
+                    f.create_dataset('task_descriptions', (0,), maxshape=(None,), dtype=h5py.string_dtype(encoding='utf-8'), chunks=True)
 
-            results = {
-                "hidden_states": hidden_states,
-                "episode_indices": episode_indices,
-                "frame_indices": frame_indices,
-                "seq_lengths": seq_lengths,
-                "task_descriptions": task_descriptions,
-            }
-            np.save(output_file, results, allow_pickle=True)
-            print(f"\n✅ Batch {batch_count} saved: {len(hidden_states)} total samples accumulated to {output_file.name}")
+                # Append new data
+                current_size = len(f['hidden_states'])
+                f['hidden_states'].resize(current_size + len(hidden_states_list), axis=0)
+                f['episode_indices'].resize(current_size + len(hidden_states_list), axis=0)
+                f['frame_indices'].resize(current_size + len(hidden_states_list), axis=0)
+                f['seq_lengths'].resize(current_size + len(hidden_states_list), axis=0)
+                f['task_descriptions'].resize(current_size + len(hidden_states_list), axis=0)
+
+                for i, hidden_state in enumerate(hidden_states_list):
+                    f['hidden_states'][current_size + i] = hidden_state
+                    f['episode_indices'][current_size + i] = episode_indices_list[i]
+                    f['frame_indices'][current_size + i] = frame_indices_list[i]
+                    f['seq_lengths'][current_size + i] = seq_lengths_list[i]
+                    f['task_descriptions'][current_size + i] = task_descriptions_list[i]
+
+            print(f"\n✅ Batch {batch_count} saved: {current_size + len(hidden_states_list)} total samples to {output_file.name}")
 
             # Clear lists to free RAM
             hidden_states_list = []
@@ -512,42 +512,49 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
 
     # Save any remaining data
     if hidden_states_list:
-        batch_count += 1
-        output_file = output_dir / "lapa_hidden_states.npy"
+        output_file = output_dir / "lapa_hidden_states.h5"
 
-        hidden_states = np.array(hidden_states_list, dtype=object)
-        episode_indices = np.array(episode_indices_list, dtype=np.int32)
-        frame_indices = np.array(frame_indices_list, dtype=np.int32)
-        seq_lengths = np.array(seq_lengths_list, dtype=np.int32)
-        task_descriptions = np.array(task_descriptions_list, dtype=object)
+        try:
+            import h5py
+        except ImportError:
+            print("❌ h5py not installed. Install with: pip install h5py")
+            return
 
-        # Load existing data if file exists, append new data
-        if output_file.exists():
-            existing = np.load(output_file, allow_pickle=True).item()
-            hidden_states = np.concatenate([existing["hidden_states"], hidden_states], dtype=object)
-            episode_indices = np.concatenate([existing["episode_indices"], episode_indices])
-            frame_indices = np.concatenate([existing["frame_indices"], frame_indices])
-            seq_lengths = np.concatenate([existing["seq_lengths"], seq_lengths])
-            task_descriptions = np.concatenate([existing["task_descriptions"], task_descriptions])
+        with h5py.File(output_file, 'a') as f:
+            # Create datasets if they don't exist
+            if 'hidden_states' not in f:
+                f.create_dataset('hidden_states', (0, 4096), maxshape=(None, 4096), dtype=np.float32, chunks=True)
+                f.create_dataset('episode_indices', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
+                f.create_dataset('frame_indices', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
+                f.create_dataset('seq_lengths', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
+                f.create_dataset('task_descriptions', (0,), maxshape=(None,), dtype=h5py.string_dtype(encoding='utf-8'), chunks=True)
 
-        results = {
-            "hidden_states": hidden_states,
-            "episode_indices": episode_indices,
-            "frame_indices": frame_indices,
-            "seq_lengths": seq_lengths,
-            "task_descriptions": task_descriptions,
-        }
-        np.save(output_file, results, allow_pickle=True)
-        print(f"\n✅ Final batch saved: {len(hidden_states)} total samples to {output_file.name}")
+            # Append new data
+            current_size = len(f['hidden_states'])
+            f['hidden_states'].resize(current_size + len(hidden_states_list), axis=0)
+            f['episode_indices'].resize(current_size + len(hidden_states_list), axis=0)
+            f['frame_indices'].resize(current_size + len(hidden_states_list), axis=0)
+            f['seq_lengths'].resize(current_size + len(hidden_states_list), axis=0)
+            f['task_descriptions'].resize(current_size + len(hidden_states_list), axis=0)
+
+            for i, hidden_state in enumerate(hidden_states_list):
+                f['hidden_states'][current_size + i] = hidden_state
+                f['episode_indices'][current_size + i] = episode_indices_list[i]
+                f['frame_indices'][current_size + i] = frame_indices_list[i]
+                f['seq_lengths'][current_size + i] = seq_lengths_list[i]
+                f['task_descriptions'][current_size + i] = task_descriptions_list[i]
+
+            final_size = len(f['hidden_states'])
 
     print(f"\n{'='*70}")
     print(f"✅ Extraction Complete")
     print(f"{'='*70}")
     print(f"Successfully extracted: {extracted_count} hidden states")
     print(f"Failed samples: {failed_count}")
-    print(f"\nSaved to: {output_dir}/lapa_hidden_states.npy")
-    print(f"  - Total samples: {len(hidden_states)}")
-    print(f"  - Contains: hidden_states, episode_indices, frame_indices, seq_lengths, task_descriptions")
+    print(f"\nSaved to: {output_dir}/lapa_hidden_states.h5 (HDF5 format)")
+    if hidden_states_list:
+        print(f"  - Total samples: {final_size}")
+    print(f"  - Contains: hidden_states [seq_len, 4096], episode_indices, frame_indices, seq_lengths, task_descriptions")
 
 
 if __name__ == "__main__":
