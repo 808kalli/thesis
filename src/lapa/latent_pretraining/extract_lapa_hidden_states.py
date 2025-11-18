@@ -365,7 +365,7 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     failed_count = 0
     extracted_count = 0
     batch_count = 0
-    save_interval = 10  # Save every N episodes
+    save_interval = 50  # Save every N episodes
 
     print(f"\nExtracting hidden states (sampling every {cfg.frame_stride} frames)...")
     print(f"(Auto-saving every {save_interval} episodes to manage RAM)")
@@ -465,41 +465,32 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
         # Incremental save every N episodes to manage RAM
         if episode_count % save_interval == 0 and hidden_states_list:
             batch_count += 1
-            output_file = output_dir / "lapa_hidden_states.h5"
+            output_file = output_dir / "lapa_hidden_states.npy"
 
-            try:
-                import h5py
-            except ImportError:
-                print("❌ h5py not installed. Install with: pip install h5py")
-                return
+            hidden_states = np.array(hidden_states_list, dtype=object)
+            episode_indices = np.array(episode_indices_list, dtype=np.int32)
+            frame_indices = np.array(frame_indices_list, dtype=np.int32)
+            seq_lengths = np.array(seq_lengths_list, dtype=np.int32)
+            task_descriptions = np.array(task_descriptions_list, dtype=object)
 
-            # Append to HDF5 file (much more efficient than numpy object arrays)
-            with h5py.File(output_file, 'a') as f:
-                # Create datasets if they don't exist
-                if 'hidden_states' not in f:
-                    # Create resizable datasets
-                    f.create_dataset('hidden_states', (0, 4096), maxshape=(None, 4096), dtype=np.float32, chunks=True)
-                    f.create_dataset('episode_indices', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
-                    f.create_dataset('frame_indices', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
-                    f.create_dataset('seq_lengths', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
-                    f.create_dataset('task_descriptions', (0,), maxshape=(None,), dtype=h5py.string_dtype(encoding='utf-8'), chunks=True)
+            # Load existing data if file exists, append new data
+            if output_file.exists():
+                existing = np.load(output_file, allow_pickle=True).item()
+                hidden_states = np.concatenate([existing["hidden_states"], hidden_states], dtype=object)
+                episode_indices = np.concatenate([existing["episode_indices"], episode_indices])
+                frame_indices = np.concatenate([existing["frame_indices"], frame_indices])
+                seq_lengths = np.concatenate([existing["seq_lengths"], seq_lengths])
+                task_descriptions = np.concatenate([existing["task_descriptions"], task_descriptions])
 
-                # Append new data
-                current_size = len(f['hidden_states'])
-                f['hidden_states'].resize(current_size + len(hidden_states_list), axis=0)
-                f['episode_indices'].resize(current_size + len(hidden_states_list), axis=0)
-                f['frame_indices'].resize(current_size + len(hidden_states_list), axis=0)
-                f['seq_lengths'].resize(current_size + len(hidden_states_list), axis=0)
-                f['task_descriptions'].resize(current_size + len(hidden_states_list), axis=0)
-
-                for i, hidden_state in enumerate(hidden_states_list):
-                    f['hidden_states'][current_size + i] = hidden_state
-                    f['episode_indices'][current_size + i] = episode_indices_list[i]
-                    f['frame_indices'][current_size + i] = frame_indices_list[i]
-                    f['seq_lengths'][current_size + i] = seq_lengths_list[i]
-                    f['task_descriptions'][current_size + i] = task_descriptions_list[i]
-
-            print(f"\n✅ Batch {batch_count} saved: {current_size + len(hidden_states_list)} total samples to {output_file.name}")
+            results = {
+                "hidden_states": hidden_states,
+                "episode_indices": episode_indices,
+                "frame_indices": frame_indices,
+                "seq_lengths": seq_lengths,
+                "task_descriptions": task_descriptions,
+            }
+            np.save(output_file, results, allow_pickle=True)
+            print(f"\n✅ Batch {batch_count} saved: {len(hidden_states)} total samples to {output_file.name}")
 
             # Clear lists to free RAM
             hidden_states_list = []
@@ -512,49 +503,43 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
 
     # Save any remaining data
     if hidden_states_list:
-        output_file = output_dir / "lapa_hidden_states.h5"
+        output_file = output_dir / "lapa_hidden_states.npy"
 
-        try:
-            import h5py
-        except ImportError:
-            print("❌ h5py not installed. Install with: pip install h5py")
-            return
+        hidden_states = np.array(hidden_states_list, dtype=object)
+        episode_indices = np.array(episode_indices_list, dtype=np.int32)
+        frame_indices = np.array(frame_indices_list, dtype=np.int32)
+        seq_lengths = np.array(seq_lengths_list, dtype=np.int32)
+        task_descriptions = np.array(task_descriptions_list, dtype=object)
 
-        with h5py.File(output_file, 'a') as f:
-            # Create datasets if they don't exist
-            if 'hidden_states' not in f:
-                f.create_dataset('hidden_states', (0, 4096), maxshape=(None, 4096), dtype=np.float32, chunks=True)
-                f.create_dataset('episode_indices', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
-                f.create_dataset('frame_indices', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
-                f.create_dataset('seq_lengths', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
-                f.create_dataset('task_descriptions', (0,), maxshape=(None,), dtype=h5py.string_dtype(encoding='utf-8'), chunks=True)
+        # Load existing data if file exists, append new data
+        if output_file.exists():
+            existing = np.load(output_file, allow_pickle=True).item()
+            hidden_states = np.concatenate([existing["hidden_states"], hidden_states], dtype=object)
+            episode_indices = np.concatenate([existing["episode_indices"], episode_indices])
+            frame_indices = np.concatenate([existing["frame_indices"], frame_indices])
+            seq_lengths = np.concatenate([existing["seq_lengths"], seq_lengths])
+            task_descriptions = np.concatenate([existing["task_descriptions"], task_descriptions])
 
-            # Append new data
-            current_size = len(f['hidden_states'])
-            f['hidden_states'].resize(current_size + len(hidden_states_list), axis=0)
-            f['episode_indices'].resize(current_size + len(hidden_states_list), axis=0)
-            f['frame_indices'].resize(current_size + len(hidden_states_list), axis=0)
-            f['seq_lengths'].resize(current_size + len(hidden_states_list), axis=0)
-            f['task_descriptions'].resize(current_size + len(hidden_states_list), axis=0)
-
-            for i, hidden_state in enumerate(hidden_states_list):
-                f['hidden_states'][current_size + i] = hidden_state
-                f['episode_indices'][current_size + i] = episode_indices_list[i]
-                f['frame_indices'][current_size + i] = frame_indices_list[i]
-                f['seq_lengths'][current_size + i] = seq_lengths_list[i]
-                f['task_descriptions'][current_size + i] = task_descriptions_list[i]
-
-            final_size = len(f['hidden_states'])
+        results = {
+            "hidden_states": hidden_states,
+            "episode_indices": episode_indices,
+            "frame_indices": frame_indices,
+            "seq_lengths": seq_lengths,
+            "task_descriptions": task_descriptions,
+        }
+        np.save(output_file, results, allow_pickle=True)
+        print(f"\n✅ Final batch saved: {len(hidden_states)} total samples to {output_file.name}")
 
     print(f"\n{'='*70}")
     print(f"✅ Extraction Complete")
     print(f"{'='*70}")
     print(f"Successfully extracted: {extracted_count} hidden states")
     print(f"Failed samples: {failed_count}")
-    print(f"\nSaved to: {output_dir}/lapa_hidden_states.h5 (HDF5 format)")
+    print(f"\nSaved to: {output_dir}/lapa_hidden_states.npy")
     if hidden_states_list:
-        print(f"  - Total samples: {final_size}")
+        print(f"  - Total samples: {len(hidden_states)}")
     print(f"  - Contains: hidden_states [seq_len, 4096], episode_indices, frame_indices, seq_lengths, task_descriptions")
+    print(f"  - Direct access: data = np.load(..., allow_pickle=True).item(); hs = data['hidden_states'][i]")
 
 
 if __name__ == "__main__":
