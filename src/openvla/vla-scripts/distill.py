@@ -449,6 +449,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                     # Extract student hidden states from model output
                     # Hidden states are [batch_size, seq_len, 4096]
                     student_hidden_states_full = output.hidden_states[-1]  # Get last layer
+                    print(f"Student hidden states shape: {student_hidden_states_full.shape}")
 
                     # Get batch metadata for frame/episode indices
                     batch_size = student_hidden_states_full.shape[0]
