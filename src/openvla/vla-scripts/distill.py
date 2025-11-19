@@ -57,6 +57,7 @@ from distillation_utils import (
     AggregationMethod,
     FrameAlignmentMode,
     SequenceAggregationMLP,
+    StudentSequenceProjectionMLP,
     FrameAlignmentStrategy,
     SimilarityMatrixDistillationLoss,
     TeacherHiddenStateLoader,
@@ -301,28 +302,6 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
     vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
 
-    # Create Optimizer =>> note that we default to a simple constant learning rate!
-    trainable_params = [param for param in vla.parameters() if param.requires_grad]
-    optimizer = AdamW(trainable_params, lr=cfg.learning_rate)
-
-    # Load checkpoint state if resuming
-    start_gradient_step = 0
-    start_batch_idx = 0
-    print(f"DEBUG: cfg.resume = {cfg.resume}")
-    print(f"DEBUG: checkpoint_dir = {checkpoint_dir}")
-    if cfg.resume:
-        print("DEBUG: Attempting to load checkpoint...")
-        training_state = load_checkpoint(checkpoint_dir, optimizer, device_id, distributed_state)
-        print(f"DEBUG: training_state returned: {training_state is not None}")
-        if training_state is not None:
-            start_gradient_step = training_state['gradient_step_idx']
-            start_batch_idx = training_state['batch_idx']
-            print(f"DEBUG: Loaded - start_gradient_step={start_gradient_step}, start_batch_idx={start_batch_idx}")
-        else:
-            print("DEBUG: training_state was None!")
-    else:
-        print("DEBUG: cfg.resume is False, not loading checkpoint")
-
     # Create Action Tokenizer
     action_tokenizer = ActionTokenizer(processor.tokenizer)
 
@@ -347,13 +326,20 @@ def finetune(cfg: FinetuneConfig) -> None:
         # Initialize teacher hidden state loader
         teacher_hidden_state_loader = TeacherHiddenStateLoader(str(cfg.teacher_h5_path))
 
-        # Initialize sequence aggregation MLPs
+        # Initialize sequence aggregation modules
         aggregation_enum = AggregationMethod(cfg.aggregation_method)
-        sequence_aggregation_student = SequenceAggregationMLP(
-            hidden_dim=4096, aggregation_method=aggregation_enum, mlp_hidden_dim=None
+
+        # Student: aggregation + bottleneck MLP (4096 → 2048 → 4096)
+        sequence_aggregation_student = StudentSequenceProjectionMLP(
+            input_dim=4096,
+            bottleneck_dim=2048,
+            aggregation_method=aggregation_enum,
         ).to(device_id)
+
+        # Teacher: pure aggregation (no MLP)
         sequence_aggregation_teacher = SequenceAggregationMLP(
-            hidden_dim=4096, aggregation_method=aggregation_enum, mlp_hidden_dim=None
+            hidden_dim=4096,
+            aggregation_method=aggregation_enum,
         ).to(device_id)
 
         # Initialize frame alignment strategy
@@ -368,6 +354,35 @@ def finetune(cfg: FinetuneConfig) -> None:
             normalize=cfg.distill_normalize,
             projection_dim=cfg.distill_projection_dim,
         ).to(device_id)
+
+    # Create Optimizer =>> note that we default to a simple constant learning rate!
+    # IMPORTANT: Must be after distillation module initialization so their parameters are included
+    trainable_params = [param for param in vla.parameters() if param.requires_grad]
+
+    # Add distillation module parameters to optimizer if enabled
+    if cfg.use_distillation:
+        trainable_params.extend(sequence_aggregation_student.parameters())
+        trainable_params.extend(distillation_loss_fn.parameters())
+
+    optimizer = AdamW(trainable_params, lr=cfg.learning_rate)
+
+    # Load checkpoint state if resuming
+    start_gradient_step = 0
+    start_batch_idx = 0
+    print(f"DEBUG: cfg.resume = {cfg.resume}")
+    print(f"DEBUG: checkpoint_dir = {checkpoint_dir}")
+    if cfg.resume:
+        print("DEBUG: Attempting to load checkpoint...")
+        training_state = load_checkpoint(checkpoint_dir, optimizer, device_id, distributed_state)
+        print(f"DEBUG: training_state returned: {training_state is not None}")
+        if training_state is not None:
+            start_gradient_step = training_state['gradient_step_idx']
+            start_batch_idx = training_state['batch_idx']
+            print(f"DEBUG: Loaded - start_gradient_step={start_gradient_step}, start_batch_idx={start_batch_idx}")
+        else:
+            print("DEBUG: training_state was None!")
+    else:
+        print("DEBUG: cfg.resume is False, not loading checkpoint")
 
     # Load Fine-tuning Dataset
     batch_transform = RLDSBatchTransform(

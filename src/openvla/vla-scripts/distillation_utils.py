@@ -31,36 +31,26 @@ class FrameAlignmentMode(Enum):
 
 class SequenceAggregationMLP(nn.Module):
     """
-    Converts [batch, seq_len, hidden_dim] → [batch, hidden_dim] using either:
+    Aggregates [batch, seq_len, hidden_dim] → [batch, hidden_dim] using either:
     - Last token: takes final hidden state
-    - Mean: averages all tokens, optionally with MLP projection
+    - Mean: averages all tokens
+
+    Used for TEACHER only (pure aggregation, no MLP).
     """
 
     def __init__(
         self,
         hidden_dim: int,
         aggregation_method: AggregationMethod = AggregationMethod.LAST,
-        mlp_hidden_dim: Optional[int] = None,
     ):
         """
         Args:
             hidden_dim: Dimension of hidden states (e.g., 4096)
-            aggregation_method: How to aggregate sequence dimension
-            mlp_hidden_dim: If specified, apply MLP after aggregation (bottleneck compression)
+            aggregation_method: How to aggregate sequence dimension (last or mean)
         """
         super().__init__()
         self.aggregation_method = aggregation_method
         self.hidden_dim = hidden_dim
-
-        # Optional MLP for projection after aggregation
-        if mlp_hidden_dim is not None and mlp_hidden_dim > 0:
-            self.mlp = nn.Sequential(
-                nn.Linear(hidden_dim, mlp_hidden_dim),
-                nn.ReLU(),
-                nn.Linear(mlp_hidden_dim, hidden_dim),
-            )
-        else:
-            self.mlp = None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
@@ -79,11 +69,74 @@ class SequenceAggregationMLP(nn.Module):
         else:
             raise ValueError(f"Unknown aggregation method: {self.aggregation_method}")
 
-        # Apply optional MLP projection
-        if self.mlp is not None:
-            aggregated = self.mlp(aggregated)
-
         return aggregated
+
+
+class StudentSequenceProjectionMLP(nn.Module):
+    """
+    Projects student hidden states through a bottleneck MLP.
+    Converts [batch, seq_len, input_dim] → [batch, input_dim]
+
+    Architecture:
+        Input [batch, seq_len, 4096]
+            ↓
+        Aggregate (last or mean) → [batch, 4096]
+            ↓
+        Linear(4096 → 2048)
+            ↓
+        ReLU
+            ↓
+        Linear(2048 → 4096)
+            ↓
+        Output [batch, 4096]
+
+    Used for STUDENT only (aggregation + bottleneck MLP).
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 4096,
+        bottleneck_dim: int = 2048,
+        aggregation_method: AggregationMethod = AggregationMethod.LAST,
+    ):
+        """
+        Args:
+            input_dim: Input dimension from model (e.g., 4096 for OpenVLA)
+            bottleneck_dim: Intermediate bottleneck dimension (e.g., 2048 for 50% compression)
+            aggregation_method: How to aggregate sequence dimension (last or mean)
+        """
+        super().__init__()
+        self.aggregation_method = aggregation_method
+        self.input_dim = input_dim
+        self.bottleneck_dim = bottleneck_dim
+
+        # MLP: input_dim → bottleneck_dim → input_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, bottleneck_dim),
+            nn.ReLU(),
+            nn.Linear(bottleneck_dim, input_dim),
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            hidden_states: [batch, seq_len, input_dim]
+
+        Returns:
+            projected: [batch, input_dim]
+        """
+        # First: aggregate sequence dimension
+        if self.aggregation_method == AggregationMethod.LAST:
+            aggregated = hidden_states[:, -1, :]  # [batch, input_dim]
+        elif self.aggregation_method == AggregationMethod.MEAN:
+            aggregated = hidden_states.mean(dim=1)  # [batch, input_dim]
+        else:
+            raise ValueError(f"Unknown aggregation method: {self.aggregation_method}")
+
+        # Second: project through bottleneck MLP
+        projected = self.mlp(aggregated)  # [batch, input_dim]
+
+        return projected
 
 
 class FrameAlignmentStrategy:
