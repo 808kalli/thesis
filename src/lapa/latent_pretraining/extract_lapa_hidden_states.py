@@ -261,14 +261,12 @@ class LAPAHiddenStateExtractor:
             )
 
 
-        # STEP 5: Extract vision token hidden states from final layer
+        # STEP 5: Extract all hidden states from final layer (text + vision + continuation)
         if hasattr(outputs, 'hidden_states') and outputs.hidden_states is not None:
             # outputs.hidden_states[-1] = final transformer layer
             # Shape: [batch=1, seq_len=text+vision+continuation, hidden_dim=4096]
-            vision_start = len(inputs.input_ids[0])  # Where vision tokens start
-            vision_end = vision_start + len(batch['input_ids'][0])  # Where they end
-
-            hidden_states = outputs.hidden_states[-1][0, vision_start:vision_end, :]
+            # Extract entire sequence including text and vision tokens for richer representations
+            hidden_states = outputs.hidden_states[-1][0, :, :]
         else:
             raise RuntimeError(
                 "Hidden states not in model output. Verify output_hidden_states=True."
@@ -362,7 +360,6 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     frame_indices_list = []
     task_descriptions_list = []
     seq_lengths_list = []
-    failed_count = 0
     extracted_count = 0
     batch_count = 0
     save_interval = 50  # Save every N episodes
@@ -379,88 +376,78 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     for episode_count, (episode_idx, episode_meta) in enumerate(episode_list, 1):
         pbar.update(1)
 
-        try:
-            # Get task description from metadata (no record loading needed)
-            task_index = episode_meta['task_index']
-            num_frames = episode_meta['num_frames']
+        # Get task description from metadata (no record loading needed)
+        task_index = episode_meta['task_index']
+        num_frames = episode_meta['num_frames']
 
-            if task_index < len(LIBERO_SPATIAL_TASKS):
-                task_description = LIBERO_SPATIAL_TASKS[task_index]
-            else:
-                print(f"\n  ⚠️  Task index {task_index} out of range, using generic prompt")
-                task_description = None
+        if task_index < len(LIBERO_SPATIAL_TASKS):
+            task_description = LIBERO_SPATIAL_TASKS[task_index]
+        else:
+            print(f"\n  ⚠️  Task index {task_index} out of range, using generic prompt")
+            task_description = None
 
-            # Find video file for this episode
-            video_path = None
-            videos_dir = dataset_dir / 'videos'
-            if videos_dir.exists():
-                for chunk_dir in sorted(videos_dir.glob('chunk-*')):
-                    image_dir = chunk_dir / 'observation.images.image'
-                    if image_dir.exists():
-                        potential_video = image_dir / f'episode_{episode_idx:06d}.mp4'
-                        if potential_video.exists():
-                            video_path = potential_video
-                            break
+        # Find video file for this episode
+        video_path = None
+        videos_dir = dataset_dir / 'videos'
+        if videos_dir.exists():
+            for chunk_dir in sorted(videos_dir.glob('chunk-*')):
+                image_dir = chunk_dir / 'observation.images.image'
+                if image_dir.exists():
+                    potential_video = image_dir / f'episode_{episode_idx:06d}.mp4'
+                    if potential_video.exists():
+                        video_path = potential_video
+                        break
 
-            if not video_path:
-                print(f"\n  ⚠️  Video not found for episode {episode_idx}")
-                failed_count += 1
-                continue
+        if not video_path:
+            raise RuntimeError(f"❌ FATAL: Video not found for episode {episode_idx}")
 
-            # Process frames at stride: 0, 12, 24, ...
-            frame_idx = 0
-            while frame_idx < num_frames:
-                try:
-                    # Extract frame from video at frame_idx using ffmpeg (supports AV1)
-                    import subprocess
+        # Process frames at stride: 0, 12, 24, ...
+        frame_idx = 0
+        while frame_idx < num_frames:
+            # Extract frame from video at frame_idx using ffmpeg (supports AV1)
+            import subprocess
 
-                    # Use ffmpeg to extract frame at index
-                    cmd = [
-                        'ffmpeg',
-                        '-i', str(video_path),
-                        '-vf', f'select=eq(n\\,{frame_idx})',
-                        '-vframes', '1',
-                        '-f', 'image2pipe',
-                        '-pix_fmt', 'rgb24',
-                        '-'
-                    ]
+            # Use ffmpeg to extract frame at index
+            cmd = [
+                'ffmpeg',
+                '-i', str(video_path),
+                '-vf', f'select=eq(n\\,{frame_idx})',
+                '-vframes', '1',
+                '-f', 'image2pipe',
+                '-pix_fmt', 'rgb24',
+                '-'
+            ]
 
-                    result = subprocess.run(cmd, capture_output=True, timeout=5)
+            result = subprocess.run(cmd, capture_output=True, timeout=5)
 
-                    if result.returncode != 0:
-                        frame_idx += cfg.frame_stride
-                        continue
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"❌ FATAL: ffmpeg failed for episode {episode_idx} frame {frame_idx}. "
+                    f"stderr: {result.stderr.decode()[:200]}"
+                )
 
-                    # Convert bytes to PIL Image
-                    from io import BytesIO
-                    frame = Image.open(BytesIO(result.stdout)).convert('RGB')
+            # Convert bytes to PIL Image
+            from io import BytesIO
+            frame = Image.open(BytesIO(result.stdout)).convert('RGB')
 
-                    # Extract hidden states [seq_len, 4096]
-                    hidden_state = extractor.extract_hidden_state_from_image(frame, task_description)
+            # Extract hidden states [seq_len, 4096]
+            hidden_state = extractor.extract_hidden_state_from_image(frame, task_description)
 
-                    # Verify shape
-                    if hidden_state.ndim != 2 or hidden_state.shape[1] != 4096:
-                        print(f"\n  ⚠️  Unexpected shape: {hidden_state.shape}")
-                        if hidden_state.ndim == 1:
-                            hidden_state = hidden_state.reshape(-1, 4096)
+            # Verify shape
+            if hidden_state.ndim != 2 or hidden_state.shape[1] != 4096:
+                raise RuntimeError(
+                    f"❌ FATAL: Unexpected hidden state shape for episode {episode_idx} frame {frame_idx}. "
+                    f"Got {hidden_state.shape}, expected [seq_len, 4096]"
+                )
 
-                    hidden_states_list.append(hidden_state)
-                    seq_lengths_list.append(hidden_state.shape[0])
-                    episode_indices_list.append(episode_idx)
-                    frame_indices_list.append(frame_idx)
-                    task_descriptions_list.append(task_description or 'unknown')
-                    extracted_count += 1
+            hidden_states_list.append(hidden_state)
+            seq_lengths_list.append(hidden_state.shape[0])
+            episode_indices_list.append(episode_idx)
+            frame_indices_list.append(frame_idx)
+            task_descriptions_list.append(task_description or 'unknown')
+            extracted_count += 1
 
-                except Exception as e:
-                    print(f"\n  ❌ Error ep {episode_idx} frame {frame_idx}: {str(e)[:60]}")
-                    failed_count += 1
-
-                frame_idx += cfg.frame_stride
-
-        except Exception as e:
-            print(f"\n  ❌ Error loading episode {episode_idx}: {str(e)[:60]}")
-            failed_count += 1
-            continue
+            frame_idx += cfg.frame_stride
 
         # Incremental save every N episodes to manage RAM
         if episode_count % save_interval == 0 and hidden_states_list:
@@ -556,7 +543,6 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     print(f"✅ Extraction Complete")
     print(f"{'='*70}")
     print(f"Successfully extracted: {extracted_count} hidden states")
-    print(f"Failed samples: {failed_count}")
     print(f"\nSaved to: {output_dir}/lapa_hidden_states.h5 (HDF5 format)")
     print(f"  - Contains: hidden_states [seq_len, 4096], episode_indices, frame_indices, seq_lengths, task_descriptions")
     print(f"  - Direct access: import h5py; f=h5py.File(...); hs=f['hidden_states'][i]; f.close()")

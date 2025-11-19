@@ -21,6 +21,7 @@ __pycache__/
 *.tmp
 *.bak
 lapa_latents.tar.gz
+*.h5
 
 # === Environment / Build Files ===
 .env
