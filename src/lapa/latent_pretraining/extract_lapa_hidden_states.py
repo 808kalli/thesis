@@ -494,8 +494,8 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
                 f['task_descriptions'].resize(current_size + len(hidden_states_list), axis=0)
 
                 for i, hidden_state in enumerate(hidden_states_list):
-                    # Store 2D array directly in variable-length dataset
-                    f['hidden_states'][current_size + i] = hidden_state.astype(np.float32)
+                    # Flatten 2D array [seq_len, 4096] and store in variable-length dataset
+                    f['hidden_states'][current_size + i] = hidden_state.astype(np.float32).flatten()
                     f['episode_indices'][current_size + i] = episode_indices_list[i]
                     f['frame_indices'][current_size + i] = frame_indices_list[i]
                     f['seq_lengths'][current_size + i] = seq_lengths_list[i]
@@ -541,7 +541,8 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
             f['task_descriptions'].resize(current_size + len(hidden_states_list), axis=0)
 
             for i, hidden_state in enumerate(hidden_states_list):
-                f['hidden_states'][current_size + i] = hidden_state.astype(np.float32)
+                # Flatten 2D array [seq_len, 4096] and store in variable-length dataset
+                f['hidden_states'][current_size + i] = hidden_state.astype(np.float32).flatten()
                 f['episode_indices'][current_size + i] = episode_indices_list[i]
                 f['frame_indices'][current_size + i] = frame_indices_list[i]
                 f['seq_lengths'][current_size + i] = seq_lengths_list[i]
