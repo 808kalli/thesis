@@ -365,7 +365,7 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     failed_count = 0
     extracted_count = 0
     batch_count = 0
-    save_interval = 50  # Save every N episodes
+    save_interval = 5  # Save every N episodes
 
     print(f"\nExtracting hidden states (sampling every {cfg.frame_stride} frames)...")
     print(f"(Auto-saving every {save_interval} episodes to manage RAM)")
