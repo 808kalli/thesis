@@ -1,727 +1,584 @@
 """
-distill.py
+finetune.py
 
-Distillation script for OpenVLAP <-> LAPA latent alignment.
-Uses combined loss strategy:
-    1. Embedding distillation: Direct alignment of latent action representations  
-    2. Contrastive distillation: Preserves similarity structure across batch
+Simple script for parameter-efficient fine-tuning of OpenVLA models loaded through the HuggingFace AutoClasses, using
+HuggingFace PEFT library for low-rank adaptation (LoRA).
 
-Key approach:
-    - Teacher (LAPA): 4 latent action token IDs from 8-word vocab
-    - Student (OpenVLAP): Uses OpenVLA-7B weights + custom distillation projection (7D -> 4D)  
-    - Loss combines embedding alignment + contrastive similarity
-    - LoRA fine-tuning for memory efficiency
+Notes & Benchmarks:
+    - Requires PEFT (`pip install peft==0.11.1`)
+    - LoRA fine-tuning (see parameters below -- no quantization, LoRA rank = 32, target_modules = all-linear):
+        + One 48 GB GPU can fit a Batch Size of 12
+        + One 80 GB GPU can fit a Batch Size of 24
 
 Run with:
-    - [Single GPU]: python distill.py
-    - [Override Config Values]: python distill.py --batch_size 32 --learning_rate 1e-4 ...
-    - [Resume Training]: python distill.py --resume --resume_from_checkpoint <PATH/TO/CHECKPOINT/DIR>
-
-Usage:
-    torchrun --standalone --nnodes=1 --nproc-per-node=1 vla-scripts/distill.py \
-        --batch_size 24 \
-        --learning_rate 1e-3 \
-        --teacher_latent_dir /root/thesis/lapa_latents \
-        --num_epochs 10 --save_every_n_epochs 1 \
-        --contrastive_loss_type "kl_divergence" \
-        --wandb_entity "eliaskallioras-national-technical-university-of-athens"
-
+    - [Single Node Multi-GPU (= $K) ]: torchrun --standalone --nnodes 1 --nproc-per-node $K vla-scripts/finetune.py
+    - [Override Config Values]: torchrun --standalone --nnodes 1 --nproc-per-node $K vla-scripts/finetune.py \
+                                    --data_root_dir <PATH/TO/RLDS/DATASETS/DIRECTORY> \
+                                    --dataset_name <DATASET_NAME> \
+                                    --run_root_dir <PATH/TO/LOGS/DIR> \
+                                    ...
+    - [Resume Training]: torchrun --standalone --nnodes 1 --nproc-per-node $K vla-scripts/finetune.py \
+                            --resume \
+                            --resume_from_checkpoint <PATH/TO/CHECKPOINT/DIR>
 """
 
 import os
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional
+import numpy as np
 
 import draccus
-import numpy as np
 import torch
 import torch.distributed as dist
 import tqdm
 from accelerate import PartialState
+from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
-from torch.utils.data import DataLoader, Dataset
-from transformers import get_scheduler
+from torch.utils.data import DataLoader
+from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
+from transformers import AutoConfig, AutoImageProcessor
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 import wandb
-import torch.nn as nn
+from prismatic.models.backbones.llm.prompting import PurePromptBuilder, VicunaV15ChatPromptBuilder
+from prismatic.util.data_utils import PaddedCollatorForActionPrediction
+from prismatic.vla.action_tokenizer import ActionTokenizer
+from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
+from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
+
+from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
+from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
+from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+
+from distillation_utils import (
+    AggregationMethod,
+    FrameAlignmentMode,
+    SequenceAggregationMLP,
+    FrameAlignmentStrategy,
+    SimilarityMatrixDistillationLoss,
+    TeacherHiddenStateLoader,
+)
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
-# ============================================================
-# SEQUENCE ACTION ENCODER WITH CAUSAL ATTENTION
-# ============================================================
-
-class SequenceActionEncoder(nn.Module):
-    """
-    Encodes a sequence of student actions to a 4D latent using causal self-attention.
-
-    Input: [B, seq_len, 7] - sequence of student actions
-    Output: [B, 4] - encoded latent
-    """
-    def __init__(self, action_dim: int = 7, hidden_dim: int = 64, latent_dim: int = 4, num_heads: int = 4):
-        super().__init__()
-
-        self.action_dim = action_dim
-        self.hidden_dim = hidden_dim
-        self.latent_dim = latent_dim
-        self.num_heads = num_heads
-
-        # Project each action: 7 → hidden_dim
-        self.action_proj = nn.Linear(action_dim, hidden_dim)
-
-        # Causal self-attention
-        self.attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=num_heads,
-            batch_first=True,
-            dropout=0.0
-        )
-
-        # Final projection to latent: hidden_dim → latent_dim
-        self.latent_proj = nn.Sequential(
-            nn.Linear(hidden_dim, latent_dim),
-            nn.Tanh(),  # Keep latents in [-1, 1] to match teacher scale
-        )
-
-    def forward(self, action_seq):
-        """
-        Args:
-            action_seq: [B, seq_len, 7] - sequence of actions
-
-        Returns:
-            latent: [B, 4] - encoded latent
-        """
-        batch_size, seq_len, _ = action_seq.shape
-
-        # Project actions to hidden dimension
-        x = self.action_proj(action_seq)  # [B, seq_len, hidden_dim]
-
-        # Create causal mask (lower triangular, can only attend to current and past)
-        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=action_seq.device) * float('-inf'), diagonal=1)
-
-        # Apply causal self-attention
-        attn_out, _ = self.attention(
-            x, x, x,
-            attn_mask=causal_mask,
-            need_weights=False
-        )  # [B, seq_len, hidden_dim]
-
-        # Pool: take last token (it has seen the full sequence)
-        last_hidden = attn_out[:, -1, :]  # [B, hidden_dim]
-
-        # Project to latent
-        latent = self.latent_proj(last_hidden)  # [B, latent_dim]
-
-        return latent
-
-
-# ============================================================
-# AUTOENCODER FOR ACTION SPACE COMPRESSION
-# ============================================================
-
-class ActionAutoencoder(nn.Module):
-    """
-    Autoencoder that compresses sequences of 7D student actions to 4D latent space.
-
-    Encoder: Uses SequenceActionEncoder with causal attention on action sequences
-    Decoder: 4D (latent) → 128D (hidden) → 64D (hidden) → 7D (reconstruction with Tanh)
-    """
-    def __init__(self, action_dim: int = 7, hidden_dim: int = 64, latent_dim: int = 4):
-        super().__init__()
-
-        # Encoder: compress sequence of 7D actions → 4D latent using causal attention
-        self.encoder = SequenceActionEncoder(
-            action_dim=action_dim,
-            hidden_dim=hidden_dim,
-            latent_dim=latent_dim,
-            num_heads=4
-        )
-
-        # Decoder: reconstruct 4D → 7D (deeper and wider)
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 128),  # Expand to 128
-            nn.ReLU(),
-            nn.Linear(128, 64),  # Further expand
-            nn.ReLU(),
-            nn.Linear(64, action_dim),
-            nn.Tanh(),  # Constrain output to [-1, 1] to match input action bounds
-        )
-
-    def encode(self, x):
-        """
-        Encode sequence of actions to 4D latent.
-
-        Args:
-            x: [B, seq_len, 7] sequence of student actions
-
-        Returns:
-            [B, 4] encoded latent
-        """
-        return self.encoder(x)
-
-    def decode(self, z):
-        """Decode 4D latent to 7D reconstruction."""
-        return self.decoder(z)
-
-    def forward(self, x):
-        """Full autoencoder pass: encode then decode."""
-        z = self.encode(x)
-        recon = self.decode(z)
-        return recon, z
-
-
 @dataclass
-class DistillConfig:
+class FinetuneConfig:
     # fmt: off
+    vla_path: str = "openvla/openvla-7b"                            # Path to OpenVLA model (on HuggingFace Hub)
 
     # Directory Paths
-    teacher_latent_dir: Path = Path("/root/thesis/lapa_latents")    # Path to directory with student_inference_results.npy
+    data_root_dir: Path = Path("datasets/open-x-embodiment")        # Path to Open-X dataset directory
+    dataset_name: str = "droid_wipe"                                # Name of fine-tuning dataset (e.g., `droid_wipe`)
+    run_root_dir: Path = Path("runs")                               # Path to directory to store logs & checkpoints
+    adapter_tmp_dir: Path = Path("adapter-tmp")                     # Temporary directory for LoRA weights before fusing
 
-    # Autoencoder Training Parameters
-    batch_size: int = 64                                            # Training batch size
-    num_epochs: int = 10                                            # Number of epochs (full passes through dataset)
-    save_every_n_epochs: int = 1                                    # Save checkpoint every N epochs
-    learning_rate: float = 1e-3                                     # Autoencoder learning rate
-    save_latest_checkpoint_only: bool = True                        # Whether to save only one checkpoint per run
+    # Fine-tuning Parameters
+    batch_size: int = 16                                            # Fine-tuning batch size
+    max_steps: int = 200_000                                        # Max number of fine-tuning steps
+    save_steps: int = 5000                                          # Interval for checkpoint saving
+    learning_rate: float = 5e-4                                     # Fine-tuning learning rate
+    grad_accumulation_steps: int = 1                                # Gradient accumulation steps
+    image_aug: bool = True                                          # Whether to train with image augmentations
+    shuffle_buffer_size: int = 100_000                              # Dataloader shuffle buffer size (can reduce if OOM)
+    save_latest_checkpoint_only: bool = True                        # Whether to save only one checkpoint per run and
+                                                                    #   continually overwrite the latest checkpoint
+                                                                    #   (If False, saves all checkpoints)
 
-    # Autoencoder Architecture Parameters
-    ae_action_dim: int = 7                                          # Student action dimension
-    ae_hidden_dim: int = 64                                         # Encoder hidden dimension
-    ae_latent_dim: int = 4                                          # Latent dimension (matches teacher)
+    # LoRA Arguments
+    use_lora: bool = True                                           # Whether to use LoRA fine-tuning
+    lora_rank: int = 32                                             # Rank of LoRA weight matrix
+    lora_dropout: float = 0.0                                       # Dropout applied to LoRA weights
+    use_quantization: bool = False                                  # Whether to 4-bit quantize VLA for LoRA fine-tuning
+                                                                    #   => CAUTION: Reduces memory but hurts performance
 
-    # Loss Parameters
-    distill_loss_type: str = "mse"                                  # "mse" or "cosine" for latent alignment
-    distill_loss_weight: float = 0.5                                # Weight for embedding distillation loss
-    contrastive_loss_weight: float = 1.0                            # Weight for contrastive loss
-    contrastive_loss_type: str = "kl_divergence"                    # "similarity_structure", "kl_divergence", or "contrastive"
-    reconstruction_weight: float = 0.5                              # Weight for reconstruction loss
+    # Checkpoint Resumption
+    resume: bool = False                                            # Whether to resume from checkpoint
+    resume_from_checkpoint: Optional[Path] = None                   # Specific checkpoint path to resume from
+                                                                    #   (if None and resume=True, uses run_dir)
 
-    # Scheduler Parameters
-    lr_scheduler_type: str = "cosine"                                # Learning rate scheduler type
-    warmup_ratio: float = 0.03                                      # Warmup ratio
-    weight_decay: float = 1e-4                                       # Weight decay
-    max_grad_norm: float = 1.0                                       # Max gradient norm for clipping
+    # Distillation Parameters
+    use_distillation: bool = False                                  # Whether to use knowledge distillation from teacher
+    teacher_h5_path: Optional[Path] = None                          # Path to lapa_hidden_states.h5 file
+    distill_weight: float = 0.1                                     # Weight of distillation loss in total loss
+    aggregation_method: str = "last"                                # How to aggregate sequence: "last" or "mean"
+    frame_alignment_mode: str = "supervised_only"                   # Frame alignment: "supervised_only" or "interpolated"
+    distill_temperature: float = 4.0                                # Temperature for similarity matrix softmax
+    distill_normalize: bool = True                                  # Whether to L2 normalize before similarity computation
+    distill_projection_dim: Optional[int] = None                    # Optional projection dimension for hidden states
 
     # Tracking Parameters
-    run_root_dir: Path = Path("runs")                               # Path to directory to store logs & checkpoints
-    wandb_project: str = "openvla-distillation"                     # Name of W&B project to log to
+    wandb_project: str = "openvla"                                  # Name of W&B project to log to (use default!)
     wandb_entity: str = "eliaskallioras"                            # Name of entity to log under
     run_id_note: Optional[str] = None                               # Extra note for logging, Weights & Biases
-
-    # Other Parameters
-    seed: int = 7                                                   # Random seed
 
     # fmt: on
 
 
-# ============================================================
-# DISTILLATION LOSS FUNCTIONS
-# ============================================================
+def save_checkpoint(
+    vla,
+    optimizer,
+    gradient_step_idx,
+    batch_idx,
+    checkpoint_dir,
+    processor,
+    vla_dataset,
+    cfg,
+    distributed_state,
+    adapter_dir=None,
+):
+    """Save complete training state for resumption."""
+    if distributed_state.is_main_process:
+        print(f"Saving Model Checkpoint for Step {gradient_step_idx}")
 
-def compute_similarity_matrix(embeddings: torch.Tensor) -> torch.Tensor:
-    """
-    Compute pairwise cosine similarity matrix for a batch of embeddings.
+        # Save processor
+        processor.save_pretrained(checkpoint_dir)
 
-    Args:
-        embeddings: [batch, hidden_dim] or [batch, seq_len, hidden_dim]
+        # Save dataset statistics
+        save_dataset_statistics(vla_dataset.dataset_statistics, checkpoint_dir)
 
-    Returns:
-        similarities: [batch, batch] matrix of cosine similarities
-    """
-    # If sequence dimension exists, pool it
-    if embeddings.ndim == 3:
-        embeddings = embeddings.mean(dim=1)  # [batch, hidden_dim]
+        # If LoRA, save adapter weights to temporary directory
+        save_dir = adapter_dir if cfg.use_lora else checkpoint_dir
+        vla.module.save_pretrained(save_dir)
 
-    # Normalize for cosine similarity
-    embeddings_norm = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+        # Save training state
+        training_state = {
+            'gradient_step_idx': gradient_step_idx,
+            'batch_idx': batch_idx,
+            'optimizer_state_dict': optimizer.state_dict(),
+            'rng_state': torch.get_rng_state(),
+            'cuda_rng_state': [state.cpu() for state in torch.cuda.get_rng_state_all()],  # Move to CPU
+        }
+        torch.save(training_state, checkpoint_dir / "training_state.pt")
 
-    # Compute pairwise similarities: [batch, hidden_dim] @ [hidden_dim, batch] -> [batch, batch]
-    similarities = embeddings_norm @ embeddings_norm.T
+    # Wait for main process to finish saving
+    dist.barrier()
 
-    return similarities
+    # Merge LoRA weights into model backbone if using LoRA
+    if cfg.use_lora:
+        base_vla = AutoModelForVision2Seq.from_pretrained(
+            cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
+        )
+        merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
+        merged_vla = merged_vla.merge_and_unload()
+        
+        if distributed_state.is_main_process:
+            merged_vla.save_pretrained(checkpoint_dir)
+            print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {checkpoint_dir}")
 
-
-def embedding_distill_loss(z_s: torch.Tensor, z_t: torch.Tensor, loss_type: str = "mse") -> torch.Tensor:
-    """
-    Direct embedding alignment loss between student and teacher latent actions.
-
-    Args:
-        z_s: student latent actions [batch, student_dim] - e.g., [batch, 7] continuous values
-        z_t: teacher latent actions [batch, teacher_dim] - e.g., [batch, 4] discrete tokens
-    """
-    if loss_type == "mse":
-        return torch.mean((z_s - z_t) ** 2)
-    elif loss_type == "cosine":
-        z_s = torch.nn.functional.normalize(z_s, dim=-1)
-        z_t = torch.nn.functional.normalize(z_t, dim=-1)
-        return 1.0 - torch.mean((z_s * z_t).sum(dim=-1))
-    else:
-        raise ValueError(f"Unknown distillation loss: {loss_type}")
-
-
-def similarity_structure_matching_loss(z_s: torch.Tensor, z_t: torch.Tensor) -> torch.Tensor:
-    """
-    Similarity structure matching loss - MSE between student and teacher similarity matrices.
-
-    Forces student to learn the same action similarity relationships as teacher:
-    if teacher says action A and B are similar, student should too.
-
-    Computes cosine similarity matrices for both sides and measures MSE between them
-    (excluding diagonal since self-similarity is always 1.0).
-
-    Args:
-        z_s: student latent actions [batch, student_dim]
-        z_t: teacher latent actions [batch, teacher_dim]
-
-    Returns:
-        MSE between off-diagonal elements of student and teacher similarity matrices
-    """
-    # Compute cosine similarity matrices
-    student_sim = compute_similarity_matrix(z_s)  # [batch, batch]
-    teacher_sim = compute_similarity_matrix(z_t)  # [batch, batch]
-
-    # Mask diagonal (self-similarity is always 1.0, not informative)
-    batch_size = z_s.shape[0]
-    mask = ~torch.eye(batch_size, dtype=torch.bool, device=z_s.device)
-
-    # MSE between off-diagonal similarities
-    return torch.mean((student_sim[mask] - teacher_sim[mask]) ** 2)
+    # Block on main process checkpointing
+    dist.barrier()
 
 
-def similarity_kl_divergence_loss(z_s: torch.Tensor, z_t: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
-    """
-    KL divergence loss between student and teacher similarity matrices.
-
-    Computes cosine similarity matrices for both sides, normalizes them to probability
-    distributions (via softmax), and measures KL divergence between them.
-
-    This encourages the student to learn the same relative similarity structure as the teacher,
-    with stronger penalty for getting the relative rankings wrong.
-
-    Args:
-        z_s: student latent actions [batch, student_dim]
-        z_t: teacher latent actions [batch, teacher_dim]
-        temperature: temperature for softmax scaling of similarity matrices (default 1.0)
-
-    Returns:
-        KL divergence between student and teacher similarity distributions
-    """
-    # Compute cosine similarity matrices
-    student_sim = compute_similarity_matrix(z_s)  # [batch, batch]
-    teacher_sim = compute_similarity_matrix(z_t)  # [batch, batch]
-
-    # Convert to probability distributions using softmax with temperature
-    # Flatten to 1D for softmax (treats each row as independent distribution)
-    batch_size = z_s.shape[0]
-
-    # Softmax over each row (for each sample, distribution over other samples)
-    student_probs = torch.nn.functional.softmax(student_sim / temperature, dim=1)
-    teacher_probs = torch.nn.functional.softmax(teacher_sim / temperature, dim=1)
-
-    # KL divergence: sum over rows
-    # KL(P||Q) = sum(P * (log(P) - log(Q)))
-    kl_div = torch.nn.functional.kl_div(
-        torch.log(student_probs + 1e-8),  # log of student (predicted)
-        teacher_probs,                     # target teacher distribution
-        reduction='batchmean'
-    )
-
-    return kl_div
-
-
-def contrastive_loss(z_s: torch.Tensor, z_t: torch.Tensor, temperature: float = 0.07) -> torch.Tensor:
-    """
-    Contrastive loss (InfoNCE) - maximize alignment between student[i] and teacher[i].
-
-    For each student sample, computes:
-    - Positive similarity: cos(student[i], teacher[i])
-    - Negative similarities: cos(student[i], teacher[j]) for all j != i
-    - Loss: -log(exp(pos/T) / sum(exp(all/T)))
-
-    This encourages the positive pair to have high similarity while negative pairs have low similarity.
-
-    Args:
-        z_s: student latent actions [batch, student_dim]
-        z_t: teacher latent actions [batch, teacher_dim]
-        temperature: temperature for scaling similarities (default 0.07)
-
-    Returns:
-        Contrastive loss
-    """
-    # Normalize for cosine similarity
-    z_s_norm = torch.nn.functional.normalize(z_s, p=2, dim=1)  # [batch, dim]
-    z_t_norm = torch.nn.functional.normalize(z_t, p=2, dim=1)  # [batch, dim]
-
-    batch_size = z_s.shape[0]
-    device = z_s.device
-
-    # Cross-model similarity: [batch, batch]
-    # cross_sim[i,j] = similarity between student[i] and teacher[j]
-    cross_sim = z_s_norm @ z_t_norm.T / temperature  # [batch, batch]
-
-    # Labels: for each student[i], the positive is teacher[i] (diagonal)
-    labels = torch.arange(batch_size, device=device)
-
-    # Loss: each student should match its corresponding teacher
-    return torch.nn.functional.cross_entropy(cross_sim, labels)
-
-
-def combined_distill_loss(
-    z_s: torch.Tensor,
-    z_t: torch.Tensor,
-    embedding_weight: float = 1.0,
-    contrastive_weight: float = 0.5,
-    loss_type: str = "mse",
-    contrastive_type: str = "structure"
-) -> Tuple[torch.Tensor, dict]:
-    """
-    Combined loss: embedding alignment + contrastive similarity.
-
-    Args:
-        z_s: student latent actions
-        z_t: teacher latent actions
-        embedding_weight: weight for embedding distillation loss
-        contrastive_weight: weight for contrastive loss
-        loss_type: type of embedding loss ("mse" or "cosine")
-        contrastive_type: type of contrastive loss
-            - "similarity_structure": MSE between similarity matrices (student-student vs teacher-teacher)
-            - "kl_divergence": KL divergence between similarity matrices (student-student vs teacher-teacher)
-            - "contrastive": contrastive loss (student[i] vs teacher[i])
-
-    Returns:
-        total_loss: weighted combination
-        loss_dict: individual loss components for logging
-    """
-    # Direct embedding alignment
-    embed_loss = embedding_distill_loss(z_s, z_t, loss_type)
-
-    # Contrastive loss (only if batch > 1)
-    if z_s.shape[0] > 1:
-        if contrastive_type == "similarity_structure":
-            contrast_loss = similarity_structure_matching_loss(z_s, z_t)
-        elif contrastive_type == "kl_divergence":
-            contrast_loss = similarity_kl_divergence_loss(z_s, z_t)
-        elif contrastive_type == "contrastive":
-            contrast_loss = contrastive_loss(z_s, z_t)
-        else:
-            raise ValueError(f"Unknown contrastive_type: {contrastive_type}. Use 'similarity_structure', 'kl_divergence', or 'contrastive'")
-    else:
-        contrast_loss = torch.tensor(0.0, device=z_s.device)
-
-    # Combine
-    total_loss = embedding_weight * embed_loss + contrastive_weight * contrast_loss
-
-    loss_dict = {
-        "embed_loss": embed_loss.item(),
-        "contrast_loss": contrast_loss.item(),
-        "total_loss": total_loss.item(),
-    }
-
-    return total_loss, loss_dict
-
-
-def autoencoder_distill_loss(
-    student_4d: torch.Tensor,
-    teacher_4d: torch.Tensor,
-    student_7d_sequence: torch.Tensor,
-    recon_7d: torch.Tensor,
-    embedding_weight: float = 0.5,
-    contrastive_weight: float = 1.0,
-    recon_weight: float = 0.5,
-    loss_type: str = "mse",
-    contrastive_type: str = "kl_divergence",
-) -> Tuple[torch.Tensor, dict]:
-    """
-    Combined autoencoder loss: latent alignment + reconstruction.
-
-    Args:
-        student_4d: [B, 4] encoded student latent (from sequence encoder)
-        teacher_4d: [B, 4] teacher latent actions
-        student_7d_sequence: [B, seq_len, 7] original student action sequence
-        recon_7d: [B, 7] reconstructed actions from autoencoder decoder
-        embedding_weight: weight for embedding distillation loss (latent alignment)
-        contrastive_weight: weight for contrastive loss (latent alignment)
-        recon_weight: weight for reconstruction loss
-        loss_type: type of embedding loss ("mse" or "cosine")
-        contrastive_type: type of contrastive loss
-
-    Returns:
-        total_loss: weighted combination of latent alignment + reconstruction
-        loss_dict: individual loss components for logging
-    """
-    # Latent alignment loss (MSE + contrastive between student 4D encoded and teacher 4D)
-    latent_align_loss, latent_loss_dict = combined_distill_loss(
-        z_s=student_4d,  # [B, 4] encoded latent from sequence
-        z_t=teacher_4d,  # [B, 4] teacher latent
-        embedding_weight=embedding_weight,
-        contrastive_weight=contrastive_weight,
-        loss_type=loss_type,
-        contrastive_type=contrastive_type,
-    )
-
-    # Reconstruction loss: MSE between original sequence and reconstructed 7D actions
-    # Note: recon_7d is [B, 7] single action, student_7d_sequence is [B, seq_len, 7]
-    # We compare against the LAST action in the sequence (or mean of sequence)
-    student_sequence_mean = student_7d_sequence.mean(dim=1)  # [B, 7] - average action in sequence
-    recon_loss = torch.nn.functional.mse_loss(recon_7d, student_sequence_mean)
-
-    # Combine losses
-    total_loss = latent_align_loss + recon_weight * recon_loss
-
-    loss_dict = {
-        "latent_align_loss": latent_align_loss.item(),
-        "embed_loss": latent_loss_dict["embed_loss"],
-        "contrast_loss": latent_loss_dict["contrast_loss"],
-        "recon_loss": recon_loss.item(),
-        "total_loss": total_loss.item(),
-    }
-
-    return total_loss, loss_dict
+def load_checkpoint(checkpoint_dir, optimizer, device_id, distributed_state):
+    """Load complete training state for resumption."""
+    training_state_path = checkpoint_dir / "training_state.pt"
+    
+    if not training_state_path.exists():
+        if distributed_state.is_main_process:
+            print(f"No training state found at {training_state_path}")
+        return None
+    
+    if distributed_state.is_main_process:
+        print(f"Loading training state from {training_state_path}")
+    
+    training_state = torch.load(training_state_path, map_location='cpu')  # Load to CPU first
+    
+    # Restore optimizer state
+    optimizer.load_state_dict(training_state['optimizer_state_dict'])
+    
+    # Restore RNG states
+    torch.set_rng_state(training_state['rng_state'])
+    
+    # Restore CUDA RNG states - ensure they're ByteTensors
+    cuda_rng_states = training_state['cuda_rng_state']
+    if isinstance(cuda_rng_states, list):
+        # Convert to ByteTensor if needed and move to appropriate device
+        cuda_rng_states = [state.to(torch.uint8) if state.dtype != torch.uint8 else state 
+                          for state in cuda_rng_states]
+        torch.cuda.set_rng_state_all(cuda_rng_states)
+    
+    if distributed_state.is_main_process:
+        print(f"Resumed from gradient step {training_state['gradient_step_idx']}, batch {training_state['batch_idx']}")
+    
+    return training_state
 
 
 @draccus.wrap()
-def distill(cfg: DistillConfig) -> None:
-    print("\n" + "="*70)
-    print("\033[91m" + " "*15 + "Do or do not; there is no try." + "\033[0m")
-    print("="*70 + "\n")
-
-    print(f"Training Autoencoder for Action Space Distillation")
-    print(f"Using pre-computed student action sequences from distill_inference.py")
+def finetune(cfg: FinetuneConfig) -> None:
+    print(f"Fine-tuning OpenVLA Model `{cfg.vla_path}` on `{cfg.dataset_name}`")
 
     # [Validate] Ensure GPU Available & Set Device / Distributed Context
-    assert torch.cuda.is_available(), "Distillation assumes at least one GPU is available!"
+    assert torch.cuda.is_available(), "Fine-tuning assumes at least one GPU is available!"
     distributed_state = PartialState()
     torch.cuda.set_device(device_id := distributed_state.local_process_index)
     torch.cuda.empty_cache()
 
-    # Set random seed
-    torch.manual_seed(cfg.seed)
-    np.random.seed(cfg.seed)
-
     # Configure Unique Experiment ID & Log Directory
-    exp_id = f"ae-distill-b{cfg.batch_size}-lr{cfg.learning_rate}"
-    if cfg.run_id_note is not None:
-        exp_id += f"--{cfg.run_id_note}"
+    # exp_id = (
+    #     f"{cfg.vla_path.split('/')[-1]}+{cfg.dataset_name}"
+    #     f"+b{cfg.batch_size * cfg.grad_accumulation_steps}"
+    #     f"+lr-{cfg.learning_rate}"
+    # )
+    # if cfg.use_lora:
+    #     exp_id += f"+lora-r{cfg.lora_rank}+dropout-{cfg.lora_dropout}"
+    # if cfg.use_quantization:
+    #     exp_id += "+q-4bit"
+    # if cfg.run_id_note is not None:
+    #     exp_id += f"--{cfg.run_id_note}"
+    # if cfg.image_aug:
+    #     exp_id += "--image_aug"
+
+    exp_id = "spatial-to-object-finetuning"
 
     # Start =>> Build Directories
-    run_dir = cfg.run_root_dir / exp_id
+    run_dir, adapter_dir = cfg.run_root_dir / exp_id, cfg.adapter_tmp_dir / exp_id
     os.makedirs(run_dir, exist_ok=True)
 
     # Initialize Logging =>> W&B
     if distributed_state.is_main_process:
-        wandb_id = f"ae-distill+{exp_id}"
+        # Resume W&B run if resuming training
+        wandb_id = f"ft+{exp_id}"
         wandb.init(
-            entity=cfg.wandb_entity,
-            project=cfg.wandb_project,
+            entity=cfg.wandb_entity, 
+            project=cfg.wandb_project, 
             name=wandb_id,
             id=None,
             resume=None,
         )
 
-    # Load pre-computed student action sequences and teacher latents from distill_inference.py
-    print(f"\nLoading pre-computed student action sequences from {cfg.teacher_latent_dir}")
-    results_file = Path(cfg.teacher_latent_dir) / "student_inference_results.npy"
+    # Determine checkpoint directory for resumption
+    checkpoint_dir = cfg.resume_from_checkpoint if cfg.resume_from_checkpoint is not None else run_dir
 
-    if not results_file.exists():
-        raise FileNotFoundError(
-            f"Student inference results not found at {results_file}. "
-            f"Please run distill_inference.py first to generate student action sequences."
+    # Quantization Config =>> only if LoRA fine-tuning
+    quantization_config = None
+    if cfg.use_quantization:
+        assert cfg.use_lora, "Quantized training only supported for LoRA fine-tuning!"
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4"
         )
 
-    results = np.load(results_file, allow_pickle=True).item()
-    student_actions_list = results["student_actions"]
-    teacher_latents_list = results["teacher_latents"]
-    video_ids_list = results["video_ids"]
+    # Register OpenVLA model to HF Auto Classes (not needed if the model is on HF Hub)
+    AutoConfig.register("openvla", OpenVLAConfig)
+    AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
+    AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
+    AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
-    print(f"Loaded {len(student_actions_list)} pre-computed samples")
-    print(f"  Example student action seq shape: {student_actions_list[0].shape}")
-    print(f"  Example teacher latent shape: {teacher_latents_list[0].shape}")
+    # Load OpenVLA Processor and Model using HF AutoClasses
+    # If resuming, load from checkpoint; otherwise load from original model
+    model_path = checkpoint_dir if cfg.resume else cfg.vla_path
+    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    vla = AutoModelForVision2Seq.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        quantization_config=quantization_config,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True,
+    )
 
-    # Create simple dataset from pre-computed data
-    class PrecomputedDataset(torch.utils.data.Dataset):
-        def __init__(self, student_actions, teacher_latents):
-            # student_actions: list of [seq_len, 7] numpy arrays
-            # teacher_latents: list of [4] numpy arrays
-            self.student_actions = [torch.tensor(a, dtype=torch.float32) for a in student_actions]
-            self.teacher_latents = [torch.tensor(t, dtype=torch.float32) for t in teacher_latents]
+    # Device Placement =>> note that BitsAndBytes automatically handles for quantized training
+    if cfg.use_quantization:
+        vla = prepare_model_for_kbit_training(vla)
+    else:
+        vla = vla.to(device_id)
 
-        def __len__(self):
-            return len(self.student_actions)
+    # [LoRA] Wrap Model w/ PEFT `LoraConfig` =>> by default we set `target_modules=all-linear`
+    if cfg.use_lora:
+        lora_config = LoraConfig(
+            r=cfg.lora_rank,
+            lora_alpha=min(cfg.lora_rank, 16),
+            lora_dropout=cfg.lora_dropout,
+            target_modules="all-linear",
+            init_lora_weights="gaussian",
+        )
+        vla = get_peft_model(vla, lora_config)
+        vla.print_trainable_parameters()
 
-        def __getitem__(self, idx):
-            student_seq = self.student_actions[idx]  # [seq_len, 7]
-            teacher_latent = self.teacher_latents[idx]  # [4]
+    # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
+    vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
 
-            # Ensure shapes are correct
-            assert student_seq.ndim == 2 and student_seq.shape[1] == 7, f"Expected [seq_len, 7], got {student_seq.shape}"
-            assert teacher_latent.ndim == 1 and teacher_latent.shape[0] == 4, f"Expected [4], got {teacher_latent.shape}"
+    # Create Optimizer =>> note that we default to a simple constant learning rate!
+    trainable_params = [param for param in vla.parameters() if param.requires_grad]
+    optimizer = AdamW(trainable_params, lr=cfg.learning_rate)
 
-            return {
-                "action_sequence": student_seq,  # [seq_len, 7]
-                "teacher_latent": teacher_latent,  # [4]
+    # Load checkpoint state if resuming
+    start_gradient_step = 0
+    start_batch_idx = 0
+    print(f"DEBUG: cfg.resume = {cfg.resume}")
+    print(f"DEBUG: checkpoint_dir = {checkpoint_dir}")
+    if cfg.resume:
+        print("DEBUG: Attempting to load checkpoint...")
+        training_state = load_checkpoint(checkpoint_dir, optimizer, device_id, distributed_state)
+        print(f"DEBUG: training_state returned: {training_state is not None}")
+        if training_state is not None:
+            start_gradient_step = training_state['gradient_step_idx']
+            start_batch_idx = training_state['batch_idx']
+            print(f"DEBUG: Loaded - start_gradient_step={start_gradient_step}, start_batch_idx={start_batch_idx}")
+        else:
+            print("DEBUG: training_state was None!")
+    else:
+        print("DEBUG: cfg.resume is False, not loading checkpoint")
+
+    # Create Action Tokenizer
+    action_tokenizer = ActionTokenizer(processor.tokenizer)
+
+    # Initialize Distillation Components (if enabled)
+    distillation_loss_fn = None
+    sequence_aggregation_student = None
+    sequence_aggregation_teacher = None
+    frame_alignment_strategy = None
+    teacher_hidden_state_loader = None
+
+    if cfg.use_distillation:
+        if cfg.teacher_h5_path is None:
+            raise ValueError("use_distillation=True but teacher_h5_path is not specified!")
+
+        if distributed_state.is_main_process:
+            print(f"Initializing knowledge distillation...")
+            print(f"  - Teacher H5: {cfg.teacher_h5_path}")
+            print(f"  - Aggregation Method: {cfg.aggregation_method}")
+            print(f"  - Frame Alignment: {cfg.frame_alignment_mode}")
+            print(f"  - Distill Weight: {cfg.distill_weight}")
+
+        # Initialize teacher hidden state loader
+        teacher_hidden_state_loader = TeacherHiddenStateLoader(str(cfg.teacher_h5_path))
+
+        # Initialize sequence aggregation MLPs
+        aggregation_enum = AggregationMethod(cfg.aggregation_method)
+        sequence_aggregation_student = SequenceAggregationMLP(
+            hidden_dim=4096, aggregation_method=aggregation_enum, mlp_hidden_dim=None
+        ).to(device_id)
+        sequence_aggregation_teacher = SequenceAggregationMLP(
+            hidden_dim=4096, aggregation_method=aggregation_enum, mlp_hidden_dim=None
+        ).to(device_id)
+
+        # Initialize frame alignment strategy
+        frame_alignment_enum = FrameAlignmentMode(cfg.frame_alignment_mode)
+        frame_alignment_strategy = FrameAlignmentStrategy(mode=frame_alignment_enum, teacher_stride=12)
+
+        # Initialize distillation loss
+        distillation_loss_fn = SimilarityMatrixDistillationLoss(
+            student_hidden_dim=4096,
+            teacher_hidden_dim=4096,
+            temperature=cfg.distill_temperature,
+            normalize=cfg.distill_normalize,
+            projection_dim=cfg.distill_projection_dim,
+        ).to(device_id)
+
+    # Load Fine-tuning Dataset
+    batch_transform = RLDSBatchTransform(
+        action_tokenizer,
+        processor.tokenizer,
+        image_transform=processor.image_processor.apply_transform,
+        prompt_builder_fn=PurePromptBuilder if "v01" not in cfg.vla_path else VicunaV15ChatPromptBuilder,
+    )
+    vla_dataset = RLDSDataset(
+        cfg.data_root_dir,
+        cfg.dataset_name,
+        batch_transform,
+        resize_resolution=tuple(vla.module.config.image_sizes),
+        shuffle_buffer_size=cfg.shuffle_buffer_size,
+        image_aug=cfg.image_aug,
+    )
+
+    # [Important] Save Dataset Statistics =>> used to de-normalize actions for inference!
+    if distributed_state.is_main_process and not cfg.resume:
+        save_dataset_statistics(vla_dataset.dataset_statistics, run_dir)
+
+    # Create Collator and DataLoader
+    collator = PaddedCollatorForActionPrediction(
+        processor.tokenizer.model_max_length, processor.tokenizer.pad_token_id, padding_side="right"
+    )
+    dataloader = DataLoader(
+        vla_dataset,
+        batch_size=cfg.batch_size,
+        sampler=None,
+        collate_fn=collator,
+        num_workers=0,  # Important =>> Set to 0 if using RLDS; TFDS rolls its own parallelism!
+    )
+
+    # Deque to store recent train metrics (used for computing smoothened metrics for gradient accumulation)
+    recent_losses = deque(maxlen=cfg.grad_accumulation_steps)
+    recent_action_accuracies = deque(maxlen=cfg.grad_accumulation_steps)
+    recent_l1_losses = deque(maxlen=cfg.grad_accumulation_steps)
+    recent_distill_losses = deque(maxlen=cfg.grad_accumulation_steps)
+
+    # Train!
+    with tqdm.tqdm(total=cfg.max_steps, initial=start_gradient_step, leave=False) as progress:
+        vla.train()
+        optimizer.zero_grad()
+        
+        for batch_idx, batch in enumerate(dataloader):
+            # Skip batches if resuming from checkpoint
+            if batch_idx < start_batch_idx:
+                continue
+
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                output: CausalLMOutputWithPast = vla(
+                    input_ids=batch["input_ids"].to(device_id),
+                    attention_mask=batch["attention_mask"].to(device_id),
+                    pixel_values=batch["pixel_values"].to(torch.bfloat16).to(device_id),
+                    labels=batch["labels"],
+                    output_hidden_states=cfg.use_distillation,  # Request hidden states if distilling
+                )
+                action_loss = output.loss
+
+            # Compute distillation loss if enabled
+            distill_loss = None
+            if cfg.use_distillation and distillation_loss_fn is not None:
+                try:
+                    # Extract student hidden states from model output
+                    # Hidden states are [batch_size, seq_len, 4096]
+                    student_hidden_states_full = output.hidden_states[-1]  # Get last layer
+
+                    # Get batch metadata for frame/episode indices
+                    batch_size = student_hidden_states_full.shape[0]
+                    episode_indices = batch.get("episode_indices", np.zeros(batch_size, dtype=np.int32))
+                    frame_indices = batch.get("frame_indices", np.zeros(batch_size, dtype=np.int32))
+
+                    if not isinstance(episode_indices, np.ndarray):
+                        episode_indices = np.array(episode_indices)
+                    if not isinstance(frame_indices, np.ndarray):
+                        frame_indices = np.array(frame_indices)
+
+                    # Load teacher hidden states for this batch
+                    teacher_states_dict, batch_frame_indices = teacher_hidden_state_loader.get_batch_teacher_states(
+                        episode_indices, frame_indices
+                    )
+
+                    if teacher_states_dict:
+                        # Align frames and get valid mask
+                        teacher_states_full, valid_mask, interp_weights = frame_alignment_strategy.align(
+                            batch_frame_indices, teacher_states_dict
+                        )
+                        teacher_states_full = teacher_states_full.to(device_id)
+                        valid_mask = valid_mask.to(device_id)
+
+                        # Aggregate sequences to single representations
+                        student_hidden_aggregated = sequence_aggregation_student(student_hidden_states_full)
+                        teacher_hidden_aggregated = sequence_aggregation_teacher(teacher_states_full)
+
+                        # Compute KL divergence loss on similarity matrices
+                        with torch.autocast("cuda", dtype=torch.float32):  # Use full precision for loss
+                            distill_loss = distillation_loss_fn(
+                                student_hidden_aggregated,
+                                teacher_hidden_aggregated,
+                                valid_mask=valid_mask,
+                            )
+                    else:
+                        if distributed_state.is_main_process:
+                            print("⚠️  Warning: No teacher hidden states loaded for batch")
+                        distill_loss = torch.tensor(0.0, device=device_id)
+
+                except Exception as e:
+                    if distributed_state.is_main_process:
+                        print(f"⚠️  Error computing distillation loss: {e}")
+                    distill_loss = torch.tensor(0.0, device=device_id)
+
+            # Combine losses
+            if distill_loss is not None and cfg.use_distillation:
+                total_loss = action_loss + cfg.distill_weight * distill_loss
+            else:
+                total_loss = action_loss
+
+            # Normalize loss to account for gradient accumulation
+            normalized_loss = total_loss / cfg.grad_accumulation_steps
+
+            # Backward pass
+            normalized_loss.backward()
+
+            # Compute Accuracy and L1 Loss for Logging
+            action_logits = output.logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
+            action_preds = action_logits.argmax(dim=2)
+            action_gt = batch["labels"][:, 1:].to(action_preds.device)
+            mask = action_gt > action_tokenizer.action_token_begin_idx
+
+            # Compute Accuracy
+            correct_preds = (action_preds == action_gt) & mask
+            action_accuracy = correct_preds.sum().float() / mask.sum().float()
+
+            # Compute L1 Loss on Predicted (Continuous) Actions
+            continuous_actions_pred = torch.tensor(
+                action_tokenizer.decode_token_ids_to_actions(action_preds[mask].cpu().numpy())
+            )
+            continuous_actions_gt = torch.tensor(
+                action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy())
+            )
+            action_l1_loss = torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
+
+            # Store recent train metrics
+            recent_losses.append(action_loss.item())
+            recent_action_accuracies.append(action_accuracy.item())
+            recent_l1_losses.append(action_l1_loss.item())
+            if distill_loss is not None:
+                recent_distill_losses.append(distill_loss.item() if isinstance(distill_loss, torch.Tensor) else distill_loss)
+
+            # Compute gradient step index
+            gradient_step_idx = batch_idx // cfg.grad_accumulation_steps
+
+            # Compute smoothened train metrics
+            #   =>> Equal to current step metrics when not using gradient accumulation
+            #   =>> Otherwise, equal to the average of metrics observed over micro-batches used for gradient accumulation
+            smoothened_loss = sum(recent_losses) / len(recent_losses)
+            smoothened_action_accuracy = sum(recent_action_accuracies) / len(recent_action_accuracies)
+            smoothened_l1_loss = sum(recent_l1_losses) / len(recent_l1_losses)
+
+            # Prepare logging dict
+            log_dict = {
+                "train_loss": smoothened_loss,
+                "action_accuracy": smoothened_action_accuracy,
+                "l1_loss": smoothened_l1_loss,
             }
 
-    dataset = PrecomputedDataset(student_actions_list, teacher_latents_list)
+            # Add distillation metrics if enabled
+            if cfg.use_distillation and len(recent_distill_losses) > 0:
+                smoothened_distill_loss = sum(recent_distill_losses) / len(recent_distill_losses)
+                log_dict["distill_loss"] = smoothened_distill_loss
+                log_dict["total_loss"] = smoothened_loss + cfg.distill_weight * smoothened_distill_loss
 
-    # Calculate total steps based on epochs and dataset size
-    steps_per_epoch = len(dataset) // cfg.batch_size
-    total_steps = cfg.num_epochs * steps_per_epoch
-    warmup_steps = int(cfg.warmup_ratio * total_steps)
+            # Push Metrics to W&B (every 10 gradient steps)
+            if distributed_state.is_main_process and gradient_step_idx % 10 == 0:
+                wandb.log(log_dict, step=gradient_step_idx)
 
-    def ae_collator(batch):
-        """Collator that handles variable-length action sequences for autoencoder."""
-        # Handle action sequences (pad to same length)
-        action_sequences = [item["action_sequence"] for item in batch]
-        max_seq_len = max(seq.shape[0] for seq in action_sequences)
+            # Optimizer Step
+            if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+                progress.update()
 
-        padded_actions = []
-        for seq in action_sequences:
-            if seq.shape[0] < max_seq_len:
-                # Pad with zeros to max_seq_len
-                pad_amount = max_seq_len - seq.shape[0]
-                padded_seq = torch.cat([seq, torch.zeros(pad_amount, 7)])
-                padded_actions.append(padded_seq)
-            else:
-                padded_actions.append(seq)
+            # Save Model Checkpoint
+            if gradient_step_idx > 0 and gradient_step_idx % cfg.save_steps == 0:
+                if cfg.save_latest_checkpoint_only:
+                    # Overwrite latest checkpoint
+                    save_checkpoint(
+                        vla, optimizer, gradient_step_idx, batch_idx,
+                        run_dir, processor, vla_dataset, cfg,
+                        distributed_state, adapter_dir if cfg.use_lora else None
+                    )
+                else:
+                    # Save checkpoint in new directory
+                    checkpoint_dir_step = Path(str(run_dir) + f"--{gradient_step_idx}_chkpt")
+                    os.makedirs(checkpoint_dir_step, exist_ok=True)
+                    
+                    adapter_dir_step = Path(str(adapter_dir) + f"--{gradient_step_idx}_chkpt") if cfg.use_lora else None
+                    if adapter_dir_step:
+                        os.makedirs(adapter_dir_step, exist_ok=True)
+                    
+                    save_checkpoint(
+                        vla, optimizer, gradient_step_idx, batch_idx,
+                        checkpoint_dir_step, processor, vla_dataset, cfg,
+                        distributed_state, adapter_dir_step
+                    )
 
-        return {
-            "action_sequence": torch.stack(padded_actions),  # [B, max_seq_len, 7]
-            "teacher_latent": torch.stack([item["teacher_latent"] for item in batch]),  # [B, 4]
-        }
-
-    # Use the custom collator
-    dataloader = DataLoader(
-        dataset,
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        collate_fn=ae_collator,
-        num_workers=0,
-    )
-
-    print(f"Loaded {len(dataset)} pre-computed samples for autoencoder training with batch_size={cfg.batch_size}")
-
-    # Deque to store recent train metrics
-    recent_losses = deque(maxlen=1)
-    recent_embed_losses = deque(maxlen=1)
-    recent_contrast_losses = deque(maxlen=1)
-
-    # Initialize autoencoder for action space compression
-    print(f"\nInitializing autoencoder...")
-    autoencoder = ActionAutoencoder(action_dim=7, hidden_dim=64, latent_dim=4).to(device_id)
-    print(f"Autoencoder initialized and moved to device {device_id}")
-
-    # Create optimizer for autoencoder only
-    ae_optimizer = AdamW(autoencoder.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
-    ae_scheduler = get_scheduler(
-        cfg.lr_scheduler_type,
-        optimizer=ae_optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps,
-    )
-
-    # Start training!
-    print(f"\nStarting autoencoder training for {cfg.num_epochs} epochs...")
-    autoencoder.train()
-    ae_optimizer.zero_grad()
-    global_step = 0
-
-    with tqdm.tqdm(total=cfg.num_epochs, desc="Overall Progress", leave=True, position=1) as epoch_progress:
-        for epoch in range(cfg.num_epochs):
-            with tqdm.tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}/{cfg.num_epochs}", leave=False, position=0) as batch_progress:
-                for batch_idx, batch in enumerate(dataloader):
-
-                    with torch.autocast("cuda", dtype=torch.bfloat16):
-
-                        # Get action sequence from batch [B, seq_len, 7]
-                        student_action_seq = batch["action_sequence"].to(device_id)
-
-                        # Autoencoder: encode sequence to 4D latent and reconstruct to 7D
-                        student_4d_encoded = autoencoder.encode(student_action_seq)  # [B, 4]
-                        student_7d_recon = autoencoder.decode(student_4d_encoded)  # [B, 7]
-
-                        # Get teacher latents
-                        teacher_hidden = batch["teacher_latent"].to(device_id)  # [B, 4]
-                        teacher_hidden = (teacher_hidden / 7.0) * 2.0 - 1.0  # normalize to [-1, 1]
-
-                        # ========================================
-                        # COMPUTE COMBINED LOSS
-                        # ========================================
-
-                        loss, loss_dict = autoencoder_distill_loss(
-                            student_4d=student_4d_encoded,  # [B, 4] - encoded latent from sequence
-                            teacher_4d=teacher_hidden,  # [B, 4] - teacher latent tokens
-                            student_7d_sequence=student_action_seq,  # [B, seq_len, 7] - action sequence
-                            recon_7d=student_7d_recon,  # [B, 7] - reconstructed 7D action
-                            embedding_weight=cfg.distill_loss_weight,
-                            contrastive_weight=cfg.contrastive_loss_weight,
-                            recon_weight=0.5,  # Weight for reconstruction loss
-                            loss_type=cfg.distill_loss_type,
-                            contrastive_type=cfg.contrastive_loss_type
-                        )
-
-                    # Backward pass
-                    loss.backward()
-
-                    # Optimizer Step (autoencoder only)
-                    torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), cfg.max_grad_norm)
-
-                    ae_optimizer.step()
-                    ae_scheduler.step()
-                    ae_optimizer.zero_grad()
-                    batch_progress.update()
-
-                    # Store train metrics
-                    recent_losses.append(loss.item())
-                    recent_embed_losses.append(loss_dict["embed_loss"])
-                    recent_contrast_losses.append(loss_dict["contrast_loss"])
-
-                    global_step += 1
-
-                    # Compute train metrics
-                    smoothened_loss = recent_losses[0]
-                    smoothened_embed_loss = recent_embed_losses[0]
-                    smoothened_contrast_loss = recent_contrast_losses[0]
-
-                    # Push Metrics to W&B (every 10 gradient steps)
-                    if distributed_state.is_main_process and global_step % 10 == 0:
-                        wandb.log(
-                            {
-                                "total_loss": smoothened_loss,
-                                "embed_loss": smoothened_embed_loss,
-                                "contrast_loss": smoothened_contrast_loss,
-                                "learning_rate": ae_scheduler.get_last_lr()[0],
-                            },
-                            step=global_step,
-                        )
-
-            # Save Autoencoder Checkpoint after each epoch
-            if (epoch + 1) % cfg.save_every_n_epochs == 0:
-                if distributed_state.is_main_process:
-                    if cfg.save_latest_checkpoint_only:
-                        checkpoint_path = run_dir / "autoencoder_latest.pt"
-                    else:
-                        checkpoint_path = run_dir / f"autoencoder_epoch{epoch+1}.pt"
-
-                    torch.save({
-                        "epoch": epoch,
-                        "global_step": global_step,
-                        "autoencoder_state_dict": autoencoder.state_dict(),
-                        "optimizer_state_dict": ae_optimizer.state_dict(),
-                        "scheduler_state_dict": ae_scheduler.state_dict(),
-                    }, checkpoint_path)
-                    print(f"  Saved autoencoder checkpoint to {checkpoint_path}")
-
-            epoch_progress.update()
-
-    print("\nAutoencoder Training Complete ✅")
-    if distributed_state.is_main_process:
-        wandb.finish()
-        print(f"Results saved to {run_dir}")
+            # Stop training when max_steps is reached
+            if gradient_step_idx == cfg.max_steps:
+                print(f"Max step {cfg.max_steps} reached! Stopping training...")
+                break
 
 
 if __name__ == "__main__":
-    distill()
+    finetune()
