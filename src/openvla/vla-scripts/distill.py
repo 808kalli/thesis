@@ -408,6 +408,12 @@ def finetune(cfg: FinetuneConfig) -> None:
                             debug_batch_msg += f"    First element: {batch[key][0]}\n"
                     else:
                         debug_batch_msg += f"  {key}: type={type(batch[key])}, value={batch[key]}\n"
+
+                # Print global_indices values if present
+                if "global_indices" in batch:
+                    debug_batch_msg += f"\nGlobal indices in batch:\n"
+                    debug_batch_msg += f"  {batch['global_indices'].cpu().numpy()}\n"
+
                 debug_batch_msg += f"{'='*80}\n"
                 raise RuntimeError(debug_batch_msg)
 
