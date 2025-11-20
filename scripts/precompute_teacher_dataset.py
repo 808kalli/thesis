@@ -14,8 +14,7 @@ This script:
 
 Output: teacher_dataset_interpolated.h5
   - teacher_states: [total_samples, 4096]
-  - episode_indices: [total_samples]
-  - frame_indices: [total_samples]
+  - global_indices: [total_samples] (index into dataset, 0..52969)
   - has_supervision: [total_samples] boolean (True if frame_idx % 12 == 0)
 
 Usage:
@@ -74,6 +73,32 @@ def get_actual_episode_lengths() -> Dict[int, int]:
     return episode_lengths
 
 
+def build_global_index_map() -> Dict[Tuple[int, int], int]:
+    """
+    Build mapping from (episode_idx, frame_idx) to global sequential index.
+
+    The dataset has a global 'index' column that's sequential 0..52969.
+    This allows us to look up teacher states by the global sample index
+    instead of episode/frame pairs.
+    """
+    print(f"Building global index map...")
+
+    data_dir = DATASET_DIR / "data"
+    parquet_files = sorted(data_dir.glob("**/*.parquet"))
+
+    index_map = {}
+
+    for pf in tqdm.tqdm(parquet_files, desc="Building index map"):
+        df = pd.read_parquet(pf, columns=["index", "episode_index", "frame_index"])
+        for _, row in df.iterrows():
+            key = (int(row["episode_index"]), int(row["frame_index"]))
+            global_idx = int(row["index"])
+            index_map[key] = global_idx
+
+    print(f"✓ Built index map with {len(index_map)} entries")
+    return index_map
+
+
 def interpolate_teacher_state(
     teacher_states: Dict[int, np.ndarray],
     frame_idx: int,
@@ -115,6 +140,9 @@ def main():
     # Get actual episode lengths from dataset
     episode_lengths = get_actual_episode_lengths()
 
+    # Build mapping from (episode, frame) to global sequential index
+    global_index_map = build_global_index_map()
+
     total_samples = 0
     supervised_count = 0
     interpolated_count = 0
@@ -125,9 +153,7 @@ def main():
         # Create output datasets
         out_f.create_dataset("teacher_states", (0, HIDDEN_DIM), maxshape=(None, HIDDEN_DIM),
                             dtype=np.float32, chunks=(1000, HIDDEN_DIM), compression="gzip")
-        out_f.create_dataset("episode_indices", (0,), maxshape=(None,),
-                            dtype=np.int32, chunks=10000, compression="gzip")
-        out_f.create_dataset("frame_indices", (0,), maxshape=(None,),
+        out_f.create_dataset("global_indices", (0,), maxshape=(None,),
                             dtype=np.int32, chunks=10000, compression="gzip")
         out_f.create_dataset("has_supervision", (0,), maxshape=(None,),
                             dtype=bool, chunks=10000, compression="gzip")
@@ -175,8 +201,7 @@ def main():
 
             # Collect all frames for this episode
             episode_states_list = []
-            episode_indices_list = []
-            frame_indices_list = []
+            global_indices_list = []
             supervision_list = []
 
             for frame_idx in range(num_frames):
@@ -184,9 +209,16 @@ def main():
                     episode_teacher_states, frame_idx, TEACHER_STRIDE
                 )
 
+                # Look up global index for this (episode, frame) pair
+                key = (episode_idx, frame_idx)
+                if key in global_index_map:
+                    global_idx = global_index_map[key]
+                else:
+                    # If not found, use -1 as sentinel (shouldn't happen)
+                    global_idx = -1
+
                 episode_states_list.append(state)
-                episode_indices_list.append(episode_idx)
-                frame_indices_list.append(frame_idx)
+                global_indices_list.append(global_idx)
                 supervision_list.append(has_supervision)
 
                 if has_supervision:
@@ -201,13 +233,11 @@ def main():
                 num_frames_to_write = len(episode_states_list)
 
                 out_f["teacher_states"].resize(current_size + num_frames_to_write, axis=0)
-                out_f["episode_indices"].resize(current_size + num_frames_to_write, axis=0)
-                out_f["frame_indices"].resize(current_size + num_frames_to_write, axis=0)
+                out_f["global_indices"].resize(current_size + num_frames_to_write, axis=0)
                 out_f["has_supervision"].resize(current_size + num_frames_to_write, axis=0)
 
                 out_f["teacher_states"][current_size:current_size+num_frames_to_write] = np.array(episode_states_list, dtype=np.float32)
-                out_f["episode_indices"][current_size:current_size+num_frames_to_write] = np.array(episode_indices_list, dtype=np.int32)
-                out_f["frame_indices"][current_size:current_size+num_frames_to_write] = np.array(frame_indices_list, dtype=np.int32)
+                out_f["global_indices"][current_size:current_size+num_frames_to_write] = np.array(global_indices_list, dtype=np.int32)
                 out_f["has_supervision"][current_size:current_size+num_frames_to_write] = np.array(supervision_list, dtype=bool)
 
             # Clear this episode's data before moving to next

@@ -410,69 +410,21 @@ def finetune(cfg: FinetuneConfig) -> None:
             # Hidden states are [batch_size, seq_len, 4096]
             student_hidden_states_full = output.hidden_states[-1]  # Get last layer
 
-            # Get batch metadata for frame/episode indices
+            # Load precomputed teacher hidden states
+            # Since both student and teacher use the same dataset in the same order,
+            # we can directly index into the teacher H5 using sample indices
             batch_size = student_hidden_states_full.shape[0]
 
-            # Debug: show all keys in batch on first batch
-            if batch_idx == 0:
-                raise RuntimeError(f"DEBUG: Batch keys = {list(batch.keys())}")
-
-            episode_indices = batch.get("episode_index", None)
-            frame_indices = batch.get("frame_index", None)
-
-            # Convert to numpy if needed
-            if episode_indices is not None:
-                if isinstance(episode_indices, torch.Tensor):
-                    episode_indices = episode_indices.cpu().numpy()
-                elif not isinstance(episode_indices, np.ndarray):
-                    episode_indices = np.array(episode_indices)
-            else:
-                episode_indices = np.zeros(batch_size, dtype=np.int32)
-
-            if frame_indices is not None:
-                if isinstance(frame_indices, torch.Tensor):
-                    frame_indices = frame_indices.cpu().numpy()
-                elif not isinstance(frame_indices, np.ndarray):
-                    frame_indices = np.array(frame_indices)
-            else:
-                frame_indices = np.zeros(batch_size, dtype=np.int32)
-
-            # Load precomputed teacher hidden states for this batch
-            # Build lookup table on first batch: (episode_idx, frame_idx) -> h5_index
-            # This avoids searching through the entire h5 file for each sample
-            if batch_idx == 0:
-                teacher_ep_indices = teacher_dataset_file["episode_indices"][:]
-                teacher_fr_indices = teacher_dataset_file["frame_indices"][:]
-                teacher_lookup = {}
-                for idx in range(len(teacher_ep_indices)):
-                    key = (int(teacher_ep_indices[idx]), int(teacher_fr_indices[idx]))
-                    teacher_lookup[key] = idx
-
-            # Look up teacher states for each sample in batch using the lookup dict
+            # Collect teacher states for this batch
             teacher_hidden_aggregated_list = []
             valid_mask_list = []
 
-            # Debug: on first batch, show what we're looking up
-            if batch_idx == 0:
-                raise RuntimeError(
-                    f"DEBUG BATCH 0:\n"
-                    f"  Episode indices: {episode_indices}\n"
-                    f"  Frame indices: {frame_indices}\n"
-                    f"  Unique (ep, fr) pairs: {set(zip(episode_indices, frame_indices))}\n"
-                    f"  Total teacher lookup entries: {len(teacher_lookup)}"
-                )
-
-            for ep_idx, fr_idx in zip(episode_indices, frame_indices):
-                ep_idx = int(ep_idx)
-                fr_idx = int(fr_idx)
-                key = (ep_idx, fr_idx)
-
-                # Direct lookup in precomputed dataset - will fail if key not found
-                h5_idx = teacher_lookup[key]
+            for sample_idx in range(batch_idx * batch_size, (batch_idx + 1) * batch_size):
+                # Direct indexing: sample_idx directly corresponds to H5 row
                 teacher_state = torch.from_numpy(
-                    np.array(teacher_dataset_file["teacher_states"][h5_idx], dtype=np.float32)
+                    np.array(teacher_dataset_file["teacher_states"][sample_idx], dtype=np.float32)
                 )
-                has_supervision = bool(teacher_dataset_file["has_supervision"][h5_idx])
+                has_supervision = bool(teacher_dataset_file["has_supervision"][sample_idx])
 
                 teacher_hidden_aggregated_list.append(teacher_state)
                 valid_mask_list.append(has_supervision)
