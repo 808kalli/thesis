@@ -447,6 +447,16 @@ def finetune(cfg: FinetuneConfig) -> None:
             teacher_hidden_aggregated_list = []
             valid_mask_list = []
 
+            # Debug: on first batch, show what we're looking up
+            if batch_idx == 0:
+                raise RuntimeError(
+                    f"DEBUG BATCH 0:\n"
+                    f"  Episode indices: {episode_indices}\n"
+                    f"  Frame indices: {frame_indices}\n"
+                    f"  Unique (ep, fr) pairs: {set(zip(episode_indices, frame_indices))}\n"
+                    f"  Total teacher lookup entries: {len(teacher_lookup)}"
+                )
+
             for ep_idx, fr_idx in zip(episode_indices, frame_indices):
                 ep_idx = int(ep_idx)
                 fr_idx = int(fr_idx)

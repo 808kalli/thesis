@@ -100,6 +100,25 @@ class InteractiveBrowser:
             print(f"Failed to load batch {batch_idx}")
             return False
 
+        # Debug: Check if teacher hidden states are actually different
+        teacher_hidden = batch_data["teacher_hidden"]
+        print(f"\n=== Batch {batch_idx} ===")
+        print(f"Teacher hidden states shape: {teacher_hidden.shape}")
+
+        # Check if all rows are identical
+        unique_rows = np.unique(teacher_hidden, axis=0)
+        print(f"Unique teacher states: {len(unique_rows)} (total: {len(teacher_hidden)})")
+
+        if len(unique_rows) == 1:
+            print("⚠️  WARNING: All teacher states in batch are IDENTICAL!")
+        else:
+            # Show pairwise differences
+            print(f"Pairwise differences (L2 norm):")
+            for i in range(min(5, len(teacher_hidden))):
+                for j in range(i+1, min(i+3, len(teacher_hidden))):
+                    diff = np.linalg.norm(teacher_hidden[i] - teacher_hidden[j])
+                    print(f"  State {i} vs {j}: {diff:.6f}")
+
         # Compute similarity matrices
         student_sim = compute_similarity_matrix(batch_data["student_hidden"], normalize=self.normalize)
         teacher_sim = compute_similarity_matrix(batch_data["teacher_hidden"], normalize=self.normalize)
