@@ -333,6 +333,12 @@ class SimilarityMatrixDistillationLoss(nn.Module):
         student_sim = torch.mm(student_hidden_states, student_hidden_states.t())  # [batch, batch]
         teacher_sim = torch.mm(teacher_hidden_states, teacher_hidden_states.t())  # [batch, batch]
 
+        # Mask out diagonal (self-similarity is always 1.0, not informative)
+        # Focus on inter-sample relationships instead
+        mask = torch.eye(batch_size, device=student_sim.device, dtype=torch.bool)
+        student_sim = student_sim.masked_fill(mask, float('-inf'))
+        teacher_sim = teacher_sim.masked_fill(mask, float('-inf'))
+
         # Apply temperature scaling
         student_sim = student_sim / self.temperature
         teacher_sim = teacher_sim / self.temperature
