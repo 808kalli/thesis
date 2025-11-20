@@ -409,10 +409,20 @@ def finetune(cfg: FinetuneConfig) -> None:
                     else:
                         debug_batch_msg += f"  {key}: type={type(batch[key])}, value={batch[key]}\n"
 
-                # Print global_indices values if present
+                # Print student global_indices values if present
                 if "global_indices" in batch:
-                    debug_batch_msg += f"\nGlobal indices in batch:\n"
-                    debug_batch_msg += f"  {batch['global_indices'].cpu().numpy()}\n"
+                    student_global_indices = batch['global_indices'].cpu().numpy()
+                    debug_batch_msg += f"\nStudent global indices in batch:\n"
+                    debug_batch_msg += f"  {student_global_indices}\n"
+
+                    # Fetch teacher global indices from H5 file for these student indices
+                    teacher_global_indices = []
+                    for student_idx in student_global_indices:
+                        teacher_idx = np.array(teacher_dataset_file["global_indices"][int(student_idx)], dtype=np.int32)
+                        teacher_global_indices.append(teacher_idx)
+
+                    debug_batch_msg += f"\nTeacher global indices (fetched from H5):\n"
+                    debug_batch_msg += f"  {np.array(teacher_global_indices)}\n"
 
                 debug_batch_msg += f"{'='*80}\n"
                 raise RuntimeError(debug_batch_msg)
