@@ -55,12 +55,8 @@ from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, Pr
 
 from distillation_utils import (
     AggregationMethod,
-    FrameAlignmentMode,
-    SequenceAggregationMLP,
     StudentSequenceProjectionMLP,
-    FrameAlignmentStrategy,
     SimilarityMatrixDistillationLoss,
-    TeacherHiddenStateLoader,
 )
 
 # Sane Defaults
@@ -99,7 +95,7 @@ class FinetuneConfig:
 
     # Distillation Parameters
     use_distillation: bool = True                                  # Whether to use knowledge distillation from teacher
-    teacher_h5_path: Optional[Path] = None                          # Path to lapa_hidden_states.h5 file
+    teacher_dataset_h5_path: Optional[Path] = None                  # Path to precomputed teacher_dataset_interpolated.h5 file
     distill_weight: float = 0.1                                     # Weight of distillation loss in total loss
     aggregation_method: str = "mean"                                # How to aggregate sequence: "last" or "mean"
     frame_alignment_mode: str = "interpolated"                   # Frame alignment: "supervised_only" or "interpolated"
@@ -301,33 +297,28 @@ def finetune(cfg: FinetuneConfig) -> None:
     action_tokenizer = ActionTokenizer(processor.tokenizer)
 
     # Initialize Distillation Components
-    if cfg.teacher_h5_path is None:
-        raise ValueError("use_distillation=True but teacher_h5_path is not specified!")
+    if cfg.teacher_dataset_h5_path is None:
+        raise ValueError("use_distillation=True but teacher_dataset_h5_path is not specified!")
 
     if distributed_state.is_main_process:
         print(f"Initializing knowledge distillation...")
-        print(f"  - Teacher H5: {cfg.teacher_h5_path}")
-        print(f"  - Aggregation Method: {cfg.aggregation_method}")
-        print(f"  - Frame Alignment: {cfg.frame_alignment_mode}")
+        print(f"  - Teacher Dataset H5: {cfg.teacher_dataset_h5_path}")
         print(f"  - Distill Weight: {cfg.distill_weight}")
 
-    # Initialize teacher hidden state loader
-    teacher_hidden_state_loader = TeacherHiddenStateLoader(str(cfg.teacher_h5_path))
+    # Load precomputed teacher dataset (already aggregated and aligned)
+    import h5py
+    teacher_dataset_file = h5py.File(str(cfg.teacher_dataset_h5_path), "r")
 
-    # Initialize sequence aggregation modules
+    # Note: No aggregation needed for teacher - already in precomputed dataset
     aggregation_enum = AggregationMethod(cfg.aggregation_method)
 
     # Student: aggregation + bottleneck MLP (4096 → 2048 → 4096)
-    # Note: Teacher hidden states are ALREADY AGGREGATED by TeacherHiddenStateLoader
+    # Teacher states are ALREADY aggregated and aligned in precomputed dataset
     sequence_aggregation_student = StudentSequenceProjectionMLP(
         input_dim=4096,
         bottleneck_dim=2048,
         aggregation_method=aggregation_enum,
     ).to(device_id)
-
-    # Initialize frame alignment strategy
-    frame_alignment_enum = FrameAlignmentMode(cfg.frame_alignment_mode)
-    frame_alignment_strategy = FrameAlignmentStrategy(mode=frame_alignment_enum, teacher_stride=12)
 
     # Initialize distillation loss
     distillation_loss_fn = SimilarityMatrixDistillationLoss(
@@ -429,46 +420,61 @@ def finetune(cfg: FinetuneConfig) -> None:
             if not isinstance(frame_indices, np.ndarray):
                 frame_indices = np.array(frame_indices)
 
-            # Load teacher hidden states for this batch (already aggregated)
-            teacher_states_dict, batch_frame_indices = teacher_hidden_state_loader.get_batch_teacher_states(
-                episode_indices, frame_indices, aggregation_method=aggregation_enum
-            )
+            # Load precomputed teacher hidden states for this batch
+            # Build lookup table on first batch: (episode_idx, frame_idx) -> h5_index
+            # This avoids searching through the entire h5 file for each sample
+            if batch_idx == 0:
+                teacher_ep_indices = teacher_dataset_file["episode_indices"][:]
+                teacher_fr_indices = teacher_dataset_file["frame_indices"][:]
+                teacher_lookup = {}
+                for idx in range(len(teacher_ep_indices)):
+                    key = (int(teacher_ep_indices[idx]), int(teacher_fr_indices[idx]))
+                    teacher_lookup[key] = idx
 
-            if teacher_states_dict:
-                # Align frames and get valid mask
-                # Note: teacher states are ALREADY AGGREGATED at this point
-                teacher_hidden_aggregated, valid_mask, interp_weights = frame_alignment_strategy.align(
-                    batch_frame_indices, teacher_states_dict
+            # Look up teacher states for each sample in batch using the lookup dict
+            teacher_hidden_aggregated_list = []
+            valid_mask_list = []
+
+            for ep_idx, fr_idx in zip(episode_indices, frame_indices):
+                ep_idx = int(ep_idx)
+                fr_idx = int(fr_idx)
+                key = (ep_idx, fr_idx)
+
+                # Direct lookup in precomputed dataset
+                idx = teacher_lookup[key]
+                teacher_state = torch.from_numpy(
+                    np.array(teacher_dataset_file["teacher_states"][idx], dtype=np.float32)
                 )
-                teacher_hidden_aggregated = teacher_hidden_aggregated.to(device_id)
-                valid_mask = valid_mask.to(device_id)
+                has_supervision = bool(teacher_dataset_file["has_supervision"][idx])
 
-                # Aggregate student sequences to single representations
-                student_hidden_aggregated = sequence_aggregation_student(student_hidden_states_full)
+                teacher_hidden_aggregated_list.append(teacher_state)
+                valid_mask_list.append(has_supervision)
 
-                # Log aggregated hidden states for first 100 batches (AFTER aggregation)
-                if batch_idx < 100:
-                    log_file = hidden_state_dir / f"batch_{batch_idx:04d}.npz"
-                    np.savez_compressed(
-                        log_file,
-                        student_hidden=student_hidden_aggregated.detach().float().cpu().numpy(),
-                        teacher_hidden=teacher_hidden_aggregated.detach().float().cpu().numpy(),
-                        batch_idx=batch_idx,
-                        aggregation_method=cfg.aggregation_method,
-                        batch_size=batch_size,
-                    )
+            teacher_hidden_aggregated = torch.stack(teacher_hidden_aggregated_list).to(device_id)
+            valid_mask = torch.tensor(valid_mask_list, dtype=torch.bool).to(device_id)
 
-                # Compute KL divergence loss on similarity matrices
-                with torch.autocast("cuda", dtype=torch.float32):  # Use full precision for loss
-                    distill_loss = distillation_loss_fn(
-                        student_hidden_aggregated,
-                        teacher_hidden_aggregated,
-                        valid_mask=valid_mask,
-                    )
-            else:
-                if distributed_state.is_main_process:
-                    print("⚠️  Warning: No teacher hidden states loaded for batch")
-                distill_loss = torch.tensor(0.0, device=device_id)
+            # Aggregate student sequences to single representations
+            student_hidden_aggregated = sequence_aggregation_student(student_hidden_states_full)
+
+            # Log aggregated hidden states for first 100 batches (AFTER aggregation)
+            if batch_idx < 100:
+                log_file = hidden_state_dir / f"batch_{batch_idx:04d}.npz"
+                np.savez_compressed(
+                    log_file,
+                    student_hidden=student_hidden_aggregated.detach().float().cpu().numpy(),
+                    teacher_hidden=teacher_hidden_aggregated.detach().float().cpu().numpy(),
+                    batch_idx=batch_idx,
+                    aggregation_method=cfg.aggregation_method,
+                    batch_size=batch_size,
+                )
+
+            # Compute KL divergence loss on similarity matrices
+            with torch.autocast("cuda", dtype=torch.float32):  # Use full precision for loss
+                distill_loss = distillation_loss_fn(
+                    student_hidden_aggregated,
+                    teacher_hidden_aggregated,
+                    valid_mask=valid_mask,
+                )
 
             # Combine losses
             total_loss = action_loss + cfg.distill_weight * distill_loss
