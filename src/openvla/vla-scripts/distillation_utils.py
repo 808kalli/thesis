@@ -117,6 +117,7 @@ class SimilarityMatrixDistillationLoss(nn.Module):
         normalize: bool = True,
         mask_diagonal: bool = True,
         projection_dim: Optional[int] = None,
+        use_layer_norm: bool = False,
     ):
         """
         Args:
@@ -126,16 +127,25 @@ class SimilarityMatrixDistillationLoss(nn.Module):
             normalize: Whether to L2 normalize before computing similarity
             mask_diagonal: Whether to mask diagonal with -inf (softmax will give 0)
             projection_dim: If specified, project to this dimension before similarity computation
+            use_layer_norm: Whether to apply LayerNorm per sample (useful when normalize=False)
         """
         super().__init__()
         self.temperature = temperature
         self.normalize = normalize
         self.mask_diagonal = mask_diagonal
+        self.use_layer_norm = use_layer_norm
 
         # Optional projection layer to match dimensions
         self.projection = None
         if projection_dim is not None:
             self.projection = nn.Linear(teacher_hidden_dim, projection_dim)
+
+        # Optional LayerNorm for per-sample stabilization (alternative to L2 normalization)
+        self.student_ln = None
+        self.teacher_ln = None
+        if use_layer_norm:
+            self.student_ln = nn.LayerNorm(student_hidden_dim)
+            self.teacher_ln = nn.LayerNorm(teacher_hidden_dim)
 
     def forward(
         self,
@@ -167,6 +177,11 @@ class SimilarityMatrixDistillationLoss(nn.Module):
         if self.normalize:
             student_hidden_states = F.normalize(student_hidden_states, p=2, dim=1)
             teacher_hidden_states = F.normalize(teacher_hidden_states, p=2, dim=1)
+
+        # Optional LayerNorm for per-sample stabilization (independent of L2 norm)
+        if self.use_layer_norm:
+            student_hidden_states = self.student_ln(student_hidden_states)
+            teacher_hidden_states = self.teacher_ln(teacher_hidden_states)
 
         # Compute similarity matrices: [batch, batch]
         # sim[i,j] = cosine similarity between sample i and sample j

@@ -103,6 +103,8 @@ class FinetuneConfig:
     distill_normalize: bool = True                                  # Whether to L2 normalize before similarity computation
     distill_mask_diagonal: bool = True                              # Whether to mask diagonal in similarity matrix (self-similarity)
     distill_projection_dim: Optional[int] = None                    # Optional projection dimension for hidden states
+    distill_use_layer_norm: bool = False                            # Whether to use LayerNorm for per-sample stabilization
+    distill_gradient_clip_norm: float = 1.0                         # Gradient clipping norm (prevents exploding gradients)
 
     # Tracking Parameters
     wandb_project: str = "openvla"                                  # Name of W&B project to log to (use default!)
@@ -306,7 +308,10 @@ def finetune(cfg: FinetuneConfig) -> None:
         print(f"  - Teacher Dataset H5: {cfg.teacher_dataset_h5_path}")
         print(f"  - Distill Weight: {cfg.distill_weight}")
         print(f"  - Temperature: {cfg.distill_temperature}")
+        print(f"  - Normalize: {cfg.distill_normalize}")
         print(f"  - Mask Diagonal: {cfg.distill_mask_diagonal}")
+        print(f"  - Use LayerNorm: {cfg.distill_use_layer_norm}")
+        print(f"  - Gradient Clip Norm: {cfg.distill_gradient_clip_norm}")
 
     # Load precomputed teacher dataset (already aggregated and aligned)
     import h5py
@@ -331,6 +336,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         normalize=cfg.distill_normalize,
         mask_diagonal=cfg.distill_mask_diagonal,
         projection_dim=cfg.distill_projection_dim,
+        use_layer_norm=cfg.distill_use_layer_norm,
     ).to(device_id)
 
     # Create Optimizer =>> note that we default to a simple constant learning rate!
@@ -523,6 +529,8 @@ def finetune(cfg: FinetuneConfig) -> None:
 
             # Optimizer Step
             if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
+                # Clip gradients to prevent exploding gradients (especially important with distill_normalize=False)
+                torch.nn.utils.clip_grad_norm_(trainable_params, cfg.distill_gradient_clip_norm)
                 optimizer.step()
                 optimizer.zero_grad()
                 progress.update()
