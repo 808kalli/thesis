@@ -412,13 +412,25 @@ def finetune(cfg: FinetuneConfig) -> None:
 
             # Get batch metadata for frame/episode indices
             batch_size = student_hidden_states_full.shape[0]
-            episode_indices = batch.get("episode_indices", np.zeros(batch_size, dtype=np.int32))
-            frame_indices = batch.get("frame_indices", np.zeros(batch_size, dtype=np.int32))
+            episode_indices = batch.get("episode_index", None)
+            frame_indices = batch.get("frame_index", None)
 
-            if not isinstance(episode_indices, np.ndarray):
-                episode_indices = np.array(episode_indices)
-            if not isinstance(frame_indices, np.ndarray):
-                frame_indices = np.array(frame_indices)
+            # Convert to numpy if needed
+            if episode_indices is not None:
+                if isinstance(episode_indices, torch.Tensor):
+                    episode_indices = episode_indices.cpu().numpy()
+                elif not isinstance(episode_indices, np.ndarray):
+                    episode_indices = np.array(episode_indices)
+            else:
+                episode_indices = np.zeros(batch_size, dtype=np.int32)
+
+            if frame_indices is not None:
+                if isinstance(frame_indices, torch.Tensor):
+                    frame_indices = frame_indices.cpu().numpy()
+                elif not isinstance(frame_indices, np.ndarray):
+                    frame_indices = np.array(frame_indices)
+            else:
+                frame_indices = np.zeros(batch_size, dtype=np.int32)
 
             # Load precomputed teacher hidden states for this batch
             # Build lookup table on first batch: (episode_idx, frame_idx) -> h5_index
@@ -440,12 +452,12 @@ def finetune(cfg: FinetuneConfig) -> None:
                 fr_idx = int(fr_idx)
                 key = (ep_idx, fr_idx)
 
-                # Direct lookup in precomputed dataset
-                idx = teacher_lookup[key]
+                # Direct lookup in precomputed dataset - will fail if key not found
+                h5_idx = teacher_lookup[key]
                 teacher_state = torch.from_numpy(
-                    np.array(teacher_dataset_file["teacher_states"][idx], dtype=np.float32)
+                    np.array(teacher_dataset_file["teacher_states"][h5_idx], dtype=np.float32)
                 )
-                has_supervision = bool(teacher_dataset_file["has_supervision"][idx])
+                has_supervision = bool(teacher_dataset_file["has_supervision"][h5_idx])
 
                 teacher_hidden_aggregated_list.append(teacher_state)
                 valid_mask_list.append(has_supervision)
