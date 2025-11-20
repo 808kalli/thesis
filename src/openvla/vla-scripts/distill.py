@@ -447,21 +447,21 @@ def finetune(cfg: FinetuneConfig) -> None:
                 teacher_states_full = teacher_states_full.to(device_id)
                 valid_mask = valid_mask.to(device_id)
 
-                # Log unaggregated hidden states for first 100 batches (BEFORE aggregation)
+                # Aggregate sequences to single representations
+                student_hidden_aggregated = sequence_aggregation_student(student_hidden_states_full)
+                teacher_hidden_aggregated = sequence_aggregation_teacher(teacher_states_full)
+
+                # Log aggregated hidden states for first 100 batches (AFTER aggregation)
                 if batch_idx < 100:
                     log_file = hidden_state_dir / f"batch_{batch_idx:04d}.npz"
                     np.savez_compressed(
                         log_file,
-                        student_hidden=student_hidden_states_full.detach().float().cpu().numpy(),
-                        teacher_hidden=teacher_states_full.detach().float().cpu().numpy(),
+                        student_hidden=student_hidden_aggregated.detach().float().cpu().numpy(),
+                        teacher_hidden=teacher_hidden_aggregated.detach().float().cpu().numpy(),
                         batch_idx=batch_idx,
                         aggregation_method=cfg.aggregation_method,
                         batch_size=batch_size,
                     )
-
-                # Aggregate sequences to single representations
-                student_hidden_aggregated = sequence_aggregation_student(student_hidden_states_full)
-                teacher_hidden_aggregated = sequence_aggregation_teacher(teacher_states_full)
 
                 # Compute KL divergence loss on similarity matrices
                 with torch.autocast("cuda", dtype=torch.float32):  # Use full precision for loss
