@@ -129,6 +129,9 @@ def make_dataset_from_rlds(
         REQUIRED_KEYS.add(language_key)
 
     def restructure(traj):
+        # preserve global_index if present (for knowledge distillation tracking)
+        saved_global_index = traj.get("global_index", None)
+
         # apply a standardization function, if provided
         if standardize_fn is not None:
             traj = standardize_fn(traj)
@@ -196,6 +199,10 @@ def make_dataset_from_rlds(
                 tf.convert_to_tensor(absolute_action_mask, dtype=tf.bool)[None],
                 [traj_len, 1],
             )
+
+        # Restore global_index if it was present (for knowledge distillation tracking)
+        if saved_global_index is not None:
+            traj["global_index"] = saved_global_index
 
         return traj
 
@@ -557,10 +564,6 @@ def make_interleaved_dataset(
             num_parallel_calls=threads,
             train=train,
         ).flatten(num_parallel_calls=threads)
-
-        # Keep global_index from TFDS if present (loaded from supervised episode .npy files)
-        # Don't overwrite with enumerate() as that creates indices beyond the dataset range
-        # The global_index is already properly set by the TFDS builder
 
         dataset = apply_per_dataset_frame_transforms(dataset, **dataset_frame_transform_kwargs)
         datasets.append(dataset)
