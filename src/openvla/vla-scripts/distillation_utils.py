@@ -133,8 +133,15 @@ class StudentSequenceProjectionMLP(nn.Module):
         else:
             raise ValueError(f"Unknown aggregation method: {self.aggregation_method}")
 
+        # Convert to float32 for MLP computation (handle BFloat16/Float16 inputs)
+        original_dtype = aggregated.dtype
+        aggregated = aggregated.float()
+
         # Second: project through bottleneck MLP
         projected = self.mlp(aggregated)  # [batch, input_dim]
+
+        # Convert back to original dtype
+        projected = projected.to(original_dtype)
 
         return projected
 
