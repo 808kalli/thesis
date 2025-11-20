@@ -97,16 +97,11 @@ class FinetuneConfig:
     use_quantization: bool = False                                  # Whether to 4-bit quantize VLA for LoRA fine-tuning
                                                                     #   => CAUTION: Reduces memory but hurts performance
 
-    # Checkpoint Resumption
-    resume: bool = False                                            # Whether to resume from checkpoint
-    resume_from_checkpoint: Optional[Path] = None                   # Specific checkpoint path to resume from
-                                                                    #   (if None and resume=True, uses run_dir)
-
     # Distillation Parameters
-    use_distillation: bool = False                                  # Whether to use knowledge distillation from teacher
+    use_distillation: bool = True                                  # Whether to use knowledge distillation from teacher
     teacher_h5_path: Optional[Path] = None                          # Path to lapa_hidden_states.h5 file
     distill_weight: float = 0.1                                     # Weight of distillation loss in total loss
-    aggregation_method: str = "last"                                # How to aggregate sequence: "last" or "mean"
+    aggregation_method: str = "mean"                                # How to aggregate sequence: "last" or "mean"
     frame_alignment_mode: str = "supervised_only"                   # Frame alignment: "supervised_only" or "interpolated"
     distill_temperature: float = 4.0                                # Temperature for similarity matrix softmax
     distill_normalize: bool = True                                  # Whether to L2 normalize before similarity computation
@@ -315,6 +310,8 @@ def finetune(cfg: FinetuneConfig) -> None:
     if cfg.use_distillation:
         if cfg.teacher_h5_path is None:
             raise ValueError("use_distillation=True but teacher_h5_path is not specified!")
+
+        raise RuntimeError(f"DEBUG: cfg.use_distillation={cfg.use_distillation}, cfg.teacher_h5_path={cfg.teacher_h5_path}")
 
         if distributed_state.is_main_process:
             print(f"Initializing knowledge distillation...")
