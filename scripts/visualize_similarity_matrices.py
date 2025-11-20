@@ -17,7 +17,7 @@ from pathlib import Path
 import sys
 
 # Default path
-DEFAULT_HIDDEN_STATES_DIR = Path("/home/elias/Thesis/checkpoints/openvla_distilled/hidden_states_logs")
+DEFAULT_HIDDEN_STATES_DIR = Path("/home/elias/Thesis/hidden_states_logs/")
 
 
 def load_batch(batch_idx, hidden_states_dir):
@@ -58,43 +58,6 @@ def compute_similarity_matrix(hidden_states, normalize=True):
     return sim_matrix
 
 
-def plot_batch(batch_data, normalize=True):
-    """Plot student and teacher similarity matrices for a batch."""
-    if batch_data is None:
-        return None
-
-    student_sim = compute_similarity_matrix(batch_data["student_hidden"], normalize=normalize)
-    teacher_sim = compute_similarity_matrix(batch_data["teacher_hidden"], normalize=normalize)
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-
-    # Student similarity matrix
-    im1 = axes[0].imshow(student_sim, cmap="viridis", aspect="auto")
-    axes[0].set_title(f"Student Similarity Matrix\n(Batch {batch_data['batch_idx']}, Size {batch_data['batch_size']})")
-    axes[0].set_xlabel("Sample Index")
-    axes[0].set_ylabel("Sample Index")
-    plt.colorbar(im1, ax=axes[0])
-
-    # Teacher similarity matrix
-    im2 = axes[1].imshow(teacher_sim, cmap="viridis", aspect="auto")
-    axes[1].set_title("Teacher Similarity Matrix")
-    axes[1].set_xlabel("Sample Index")
-    axes[1].set_ylabel("Sample Index")
-    plt.colorbar(im2, ax=axes[1])
-
-    # Add metadata
-    fig.suptitle(
-        f"Aggregation: {batch_data['aggregation_method']} | "
-        f"Normalize: {normalize} | "
-        f"Use arrow keys to navigate, q to quit",
-        fontsize=10,
-        y=0.98
-    )
-
-    plt.tight_layout()
-    return fig, (student_sim, teacher_sim)
-
-
 class InteractiveBrowser:
     """Interactive browser for similarity matrices."""
 
@@ -103,11 +66,14 @@ class InteractiveBrowser:
         self.normalize = normalize
         self.current_batch = 0
         self.max_batch = self._find_max_batch()
-        self.fig = None
-        self.similarity_matrices = None
 
-        # Setup plot
-        plt.ion()  # Interactive mode
+        # Figure and axes (reused)
+        self.fig = None
+        self.axes = None
+        self.im1 = None
+        self.im2 = None
+        self.cbar1 = None
+        self.cbar2 = None
 
     def _find_max_batch(self):
         """Find the maximum batch index available."""
@@ -117,8 +83,14 @@ class InteractiveBrowser:
             return -1
         return len(batch_files) - 1
 
-    def show_batch(self, batch_idx):
-        """Show a specific batch."""
+    def create_figure(self):
+        """Create the figure and axes once."""
+        self.fig, self.axes = plt.subplots(1, 2, figsize=(14, 6))
+        plt.tight_layout(pad=3.0)
+        return self.fig
+
+    def update_batch(self, batch_idx):
+        """Update the displayed batch by modifying existing figure."""
         if batch_idx < 0 or batch_idx > self.max_batch:
             print(f"Invalid batch index: {batch_idx} (valid range: 0-{self.max_batch})")
             return False
@@ -128,32 +100,54 @@ class InteractiveBrowser:
             print(f"Failed to load batch {batch_idx}")
             return False
 
-        # Clear previous figure
-        if self.fig is not None:
-            plt.close(self.fig)
+        # Compute similarity matrices
+        student_sim = compute_similarity_matrix(batch_data["student_hidden"], normalize=self.normalize)
+        teacher_sim = compute_similarity_matrix(batch_data["teacher_hidden"], normalize=self.normalize)
 
-        result = plot_batch(batch_data, normalize=self.normalize)
-        if result is None:
-            return False
+        # Update left plot (student)
+        self.axes[0].clear()
+        self.im1 = self.axes[0].imshow(student_sim, cmap="viridis", aspect="auto")
+        self.axes[0].set_title(f"Student Similarity Matrix\n(Batch {batch_data['batch_idx']}, Size {batch_data['batch_size']})")
+        self.axes[0].set_xlabel("Sample Index")
+        self.axes[0].set_ylabel("Sample Index")
+        if self.cbar1 is not None:
+            self.cbar1.remove()
+        self.cbar1 = plt.colorbar(self.im1, ax=self.axes[0])
 
-        self.fig, self.similarity_matrices = result
+        # Update right plot (teacher)
+        self.axes[1].clear()
+        self.im2 = self.axes[1].imshow(teacher_sim, cmap="viridis", aspect="auto")
+        self.axes[1].set_title("Teacher Similarity Matrix")
+        self.axes[1].set_xlabel("Sample Index")
+        self.axes[1].set_ylabel("Sample Index")
+        if self.cbar2 is not None:
+            self.cbar2.remove()
+        self.cbar2 = plt.colorbar(self.im2, ax=self.axes[1])
+
+        # Update title
+        self.fig.suptitle(
+            f"Aggregation: {batch_data['aggregation_method']} | "
+            f"Normalize: {self.normalize} | "
+            f"Batch {batch_idx}/{self.max_batch} | "
+            f"Use arrow keys to navigate, q to quit",
+            fontsize=10,
+        )
+
         self.current_batch = batch_idx
-
-        plt.draw()
-        plt.pause(0.001)
+        self.fig.canvas.draw()
         return True
 
     def next_batch(self):
         """Move to next batch."""
         if self.current_batch < self.max_batch:
-            self.show_batch(self.current_batch + 1)
+            self.update_batch(self.current_batch + 1)
         else:
             print(f"Already at last batch ({self.max_batch})")
 
     def prev_batch(self):
         """Move to previous batch."""
         if self.current_batch > 0:
-            self.show_batch(self.current_batch - 1)
+            self.update_batch(self.current_batch - 1)
         else:
             print("Already at first batch (0)")
 
@@ -182,12 +176,16 @@ class InteractiveBrowser:
         print("  q: Quit")
         print()
 
+        # Create figure once
+        self.create_figure()
+
         # Show first batch
-        self.show_batch(0)
+        self.update_batch(0)
 
         # Connect key press event
         self.fig.canvas.mpl_connect("key_press_event", self.on_key)
 
+        # Show and block
         plt.show()
 
 

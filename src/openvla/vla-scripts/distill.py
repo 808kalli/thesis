@@ -439,6 +439,27 @@ def finetune(cfg: FinetuneConfig) -> None:
                 episode_indices, frame_indices
             )
 
+            # DEBUG: Print teacher states dict info and raise error
+            if batch_idx == 0:  # Only on first batch
+                print("\n" + "="*80)
+                print("DEBUG: Teacher States Dict Info")
+                print("="*80)
+                print(f"Number of frames in dict: {len(teacher_states_dict)}")
+                print(f"Frame indices in dict: {sorted(teacher_states_dict.keys())}")
+                print(f"Batch frame indices: {batch_frame_indices}")
+                if teacher_states_dict:
+                    first_frame_idx = list(teacher_states_dict.keys())[0]
+                    first_state = teacher_states_dict[first_frame_idx]
+                    print(f"\nFirst teacher state (frame {first_frame_idx}):")
+                    print(f"  Shape: {first_state.shape}")
+                    print(f"  Min: {first_state.min():.6f}, Max: {first_state.max():.6f}")
+                    print(f"  Data: {first_state}")
+                    print(f"\nAll frames' first sample (first dimension):")
+                    for frame_idx in sorted(teacher_states_dict.keys())[:5]:  # Show first 5 frames
+                        state = teacher_states_dict[frame_idx]
+                        print(f"  Frame {frame_idx}: {state[0] if state.shape[0] > 0 else 'empty'}")
+                raise RuntimeError("DEBUG: Stopping to inspect teacher states dict")
+
             if teacher_states_dict:
                 # Align frames and get valid mask
                 teacher_states_full, valid_mask, interp_weights = frame_alignment_strategy.align(
