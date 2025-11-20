@@ -453,19 +453,11 @@ def finetune(cfg: FinetuneConfig) -> None:
 
                 # Log aggregated hidden states for first 100 batches
                 if batch_idx < 100:
-                    import torch
-                    log_data = {
-                        "batch_idx": batch_idx,
-                        "student_hidden": student_hidden_aggregated.detach().cpu().numpy(),
-                        "teacher_hidden": teacher_hidden_aggregated.detach().cpu().numpy(),
-                        "aggregation_method": cfg.aggregation_method,
-                        "batch_size": batch_size,
-                    }
                     log_file = hidden_state_dir / f"batch_{batch_idx:04d}.npz"
                     np.savez_compressed(
                         log_file,
-                        student_hidden=log_data["student_hidden"],
-                        teacher_hidden=log_data["teacher_hidden"],
+                        student_hidden=student_hidden_aggregated.detach().cpu().numpy(),
+                        teacher_hidden=teacher_hidden_aggregated.detach().cpu().numpy(),
                         batch_idx=batch_idx,
                         aggregation_method=cfg.aggregation_method,
                         batch_size=batch_size,
