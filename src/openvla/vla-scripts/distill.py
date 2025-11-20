@@ -395,38 +395,6 @@ def finetune(cfg: FinetuneConfig) -> None:
             if batch_idx < start_batch_idx:
                 continue
 
-            # DEBUG: Print first batch structure to verify global_indices field
-            if batch_idx == 0:
-                debug_batch_msg = f"\n{'='*80}\nFIRST BATCH (batch_idx=0) FIELDS:\n"
-                debug_batch_msg += f"Batch keys: {list(batch.keys())}\n"
-                for key in batch.keys():
-                    if isinstance(batch[key], torch.Tensor):
-                        debug_batch_msg += f"  {key}: shape={batch[key].shape}, dtype={batch[key].dtype}\n"
-                    elif isinstance(batch[key], (list, tuple)):
-                        debug_batch_msg += f"  {key}: type={type(batch[key])}, len={len(batch[key])}\n"
-                        if len(batch[key]) > 0 and hasattr(batch[key][0], '__len__'):
-                            debug_batch_msg += f"    First element: {batch[key][0]}\n"
-                    else:
-                        debug_batch_msg += f"  {key}: type={type(batch[key])}, value={batch[key]}\n"
-
-                # Print student global_indices values if present
-                if "global_indices" in batch:
-                    student_global_indices = batch['global_indices'].cpu().numpy()
-                    debug_batch_msg += f"\nStudent global indices in batch:\n"
-                    debug_batch_msg += f"  {student_global_indices}\n"
-
-                    # Fetch teacher global indices from H5 file for these student indices
-                    teacher_global_indices = []
-                    for student_idx in student_global_indices:
-                        teacher_idx = np.array(teacher_dataset_file["global_indices"][int(student_idx)], dtype=np.int32)
-                        teacher_global_indices.append(teacher_idx)
-
-                    debug_batch_msg += f"\nTeacher global indices (fetched from H5):\n"
-                    debug_batch_msg += f"  {np.array(teacher_global_indices)}\n"
-
-                debug_batch_msg += f"{'='*80}\n"
-                raise RuntimeError(debug_batch_msg)
-
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output: CausalLMOutputWithPast = vla(
                     input_ids=batch["input_ids"].to(device_id),
