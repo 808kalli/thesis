@@ -58,12 +58,37 @@ def compute_similarity_matrix(hidden_states, normalize=True):
     return sim_matrix
 
 
+def apply_temperature_and_masking(sim_matrix, temperature=1.0, mask_diagonal=False):
+    """
+    Apply temperature scaling and optional diagonal masking to similarity matrix.
+
+    Args:
+        sim_matrix: [batch_size, batch_size] similarity matrix
+        temperature: Temperature for scaling (temperature > 1 makes softmax softer)
+        mask_diagonal: If True, set diagonal to -inf (softmax will give 0)
+
+    Returns:
+        processed_matrix: similarity matrix with temperature applied and optional diagonal masking
+    """
+    # Apply temperature scaling
+    processed = sim_matrix / temperature if temperature != 1.0 else sim_matrix.copy()
+
+    # Mask diagonal if requested
+    if mask_diagonal:
+        # Set diagonal to -inf so softmax gives 0
+        np.fill_diagonal(processed, -np.inf)
+
+    return processed
+
+
 class InteractiveBrowser:
     """Interactive browser for similarity matrices."""
 
-    def __init__(self, hidden_states_dir, normalize=True):
+    def __init__(self, hidden_states_dir, normalize=True, temperature=1.0, mask_diagonal=False):
         self.hidden_states_dir = Path(hidden_states_dir)
         self.normalize = normalize
+        self.temperature = temperature
+        self.mask_diagonal = mask_diagonal
         self.current_batch = 0
         self.max_batch = self._find_max_batch()
 
@@ -123,6 +148,10 @@ class InteractiveBrowser:
         student_sim = compute_similarity_matrix(batch_data["student_hidden"], normalize=self.normalize)
         teacher_sim = compute_similarity_matrix(batch_data["teacher_hidden"], normalize=self.normalize)
 
+        # Apply temperature scaling and optional diagonal masking
+        student_sim = apply_temperature_and_masking(student_sim, temperature=self.temperature, mask_diagonal=self.mask_diagonal)
+        teacher_sim = apply_temperature_and_masking(teacher_sim, temperature=self.temperature, mask_diagonal=self.mask_diagonal)
+
         # Update left plot (student)
         self.axes[0].clear()
         self.im1 = self.axes[0].imshow(student_sim, cmap="viridis", aspect="auto")
@@ -147,6 +176,7 @@ class InteractiveBrowser:
         self.fig.suptitle(
             f"Aggregation: {batch_data['aggregation_method']} | "
             f"Normalize: {self.normalize} | "
+            f"Temperature: {self.temperature} | "
             f"Batch {batch_idx}/{self.max_batch} | "
             f"Use arrow keys to navigate, q to quit",
             fontsize=10,
@@ -189,6 +219,8 @@ class InteractiveBrowser:
         print(f"Loading batches from: {self.hidden_states_dir}")
         print(f"Found {self.max_batch + 1} batches (0-{self.max_batch})")
         print(f"Normalization: {self.normalize}")
+        print(f"Temperature: {self.temperature}")
+        print(f"Diagonal Masking: {self.mask_diagonal}")
         print("\nControls:")
         print("  Right Arrow / Space: Next batch")
         print("  Left Arrow / Backspace: Previous batch")
@@ -224,6 +256,18 @@ def main():
         default=True,
         help="Whether to L2 normalize hidden states before computing similarity (default: True)"
     )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Temperature for scaling similarity matrices (higher = softer softmax, default: 1.0)"
+    )
+    parser.add_argument(
+        "--mask_diagonal",
+        type=lambda x: x.lower() == "true",
+        default=False,
+        help="Whether to mask diagonal with -inf (softmax will give 0 on diagonal, default: False)"
+    )
 
     args = parser.parse_args()
 
@@ -234,7 +278,12 @@ def main():
         sys.exit(1)
 
     # Start browser
-    browser = InteractiveBrowser(hidden_states_dir, normalize=args.normalize)
+    browser = InteractiveBrowser(
+        hidden_states_dir,
+        normalize=args.normalize,
+        temperature=args.temperature,
+        mask_diagonal=args.mask_diagonal
+    )
     browser.run()
 
 
