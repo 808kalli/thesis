@@ -558,8 +558,9 @@ def make_interleaved_dataset(
             train=train,
         ).flatten(num_parallel_calls=threads)
 
-        # Add global index enumeration for knowledge distillation tracking
-        dataset = dataset.enumerate().map(lambda idx, sample: {**sample, "global_index": idx})
+        # Keep global_index from TFDS if present (loaded from supervised episode .npy files)
+        # Don't overwrite with enumerate() as that creates indices beyond the dataset range
+        # The global_index is already properly set by the TFDS builder
 
         dataset = apply_per_dataset_frame_transforms(dataset, **dataset_frame_transform_kwargs)
         datasets.append(dataset)
