@@ -318,15 +318,10 @@ def finetune(cfg: FinetuneConfig) -> None:
     aggregation_enum = AggregationMethod(cfg.aggregation_method)
 
     # Student: aggregation + bottleneck MLP (4096 → 2048 → 4096)
+    # Note: Teacher hidden states are ALREADY AGGREGATED by TeacherHiddenStateLoader
     sequence_aggregation_student = StudentSequenceProjectionMLP(
         input_dim=4096,
         bottleneck_dim=2048,
-        aggregation_method=aggregation_enum,
-    ).to(device_id)
-
-    # Teacher: pure aggregation (no MLP)
-    sequence_aggregation_teacher = SequenceAggregationMLP(
-        hidden_dim=4096,
         aggregation_method=aggregation_enum,
     ).to(device_id)
 
@@ -434,22 +429,22 @@ def finetune(cfg: FinetuneConfig) -> None:
             if not isinstance(frame_indices, np.ndarray):
                 frame_indices = np.array(frame_indices)
 
-            # Load teacher hidden states for this batch
+            # Load teacher hidden states for this batch (already aggregated)
             teacher_states_dict, batch_frame_indices = teacher_hidden_state_loader.get_batch_teacher_states(
-                episode_indices, frame_indices
+                episode_indices, frame_indices, aggregation_method=aggregation_enum
             )
 
             if teacher_states_dict:
                 # Align frames and get valid mask
-                teacher_states_full, valid_mask, interp_weights = frame_alignment_strategy.align(
+                # Note: teacher states are ALREADY AGGREGATED at this point
+                teacher_hidden_aggregated, valid_mask, interp_weights = frame_alignment_strategy.align(
                     batch_frame_indices, teacher_states_dict
                 )
-                teacher_states_full = teacher_states_full.to(device_id)
+                teacher_hidden_aggregated = teacher_hidden_aggregated.to(device_id)
                 valid_mask = valid_mask.to(device_id)
 
-                # Aggregate sequences to single representations
+                # Aggregate student sequences to single representations
                 student_hidden_aggregated = sequence_aggregation_student(student_hidden_states_full)
-                teacher_hidden_aggregated = sequence_aggregation_teacher(teacher_states_full)
 
                 # Log aggregated hidden states for first 100 batches (AFTER aggregation)
                 if batch_idx < 100:

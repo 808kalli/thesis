@@ -150,12 +150,16 @@ class FrameAlignmentStrategy:
     """
     Handles alignment of teacher hidden states (every 12 frames) with student frames (every frame).
 
-    Teacher frames: 0, 12, 24, 36, ...
+    **IMPORTANT**: Teacher hidden states are ALREADY AGGREGATED at this point (each is [hidden_dim] not [seq_len, hidden_dim]).
+    Aggregation happens in TeacherHiddenStateLoader.load_episode() before alignment.
+
+    Teacher frames: 0, 12, 24, 36, ... (each is a single aggregated vector [4096])
     Student frames: 0, 1, 2, 3, ..., 11, 12, ..., 23, 24, ...
 
     Two strategies:
-    1. supervised_only: Only compute loss for frames 0, 12, 24, ... (with teacher supervision)
-    2. interpolated: Interpolate teacher states for all frames (e.g., frame 6 gets 0.5 * state[0] + 0.5 * state[12])
+    1. supervised_only: Only supervise frames 0, 12, 24, ... (with teacher supervision)
+    2. interpolated: Interpolate between adjacent teacher frames for all student frames
+       (e.g., frame 6 gets 0.5 * aggregated_state[0] + 0.5 * aggregated_state[12])
     """
 
     def __init__(self, mode: FrameAlignmentMode = FrameAlignmentMode.SUPERVISED_ONLY, teacher_stride: int = 12):
@@ -170,17 +174,17 @@ class FrameAlignmentStrategy:
     def align(
         self,
         batch_frame_indices: np.ndarray,  # [batch_size] - frame index for each sample
-        teacher_hidden_states: Dict[int, torch.Tensor],  # {frame_idx: [seq_len, hidden_dim]}
+        teacher_hidden_states: Dict[int, torch.Tensor],  # {frame_idx: [hidden_dim]} (already aggregated)
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Align teacher states to student batch frames.
 
         Args:
             batch_frame_indices: [batch_size] frame indices for each sample in the batch
-            teacher_hidden_states: Dict mapping frame indices to teacher hidden states [seq_len, hidden_dim]
+            teacher_hidden_states: Dict mapping frame indices to aggregated teacher hidden states [hidden_dim]
 
         Returns:
-            aligned_teacher_states: [batch_size, hidden_dim] aggregated teacher states
+            aligned_teacher_states: [batch_size, hidden_dim] aligned aggregated teacher states
             valid_mask: [batch_size] boolean mask indicating which samples have valid supervision
             interpolation_weights: [batch_size, 2] weights for interpolation (for debugging/analysis)
         """
@@ -249,10 +253,10 @@ class FrameAlignmentStrategy:
 
         # Stack all states
         if aligned_states:
-            # Stack sequences: [batch_size, seq_len, hidden_dim] (before aggregation)
+            # Stack aggregated states: [batch_size, hidden_dim]
             stacked_states = torch.stack(aligned_states, dim=0)
         else:
-            stacked_states = torch.zeros((batch_size, 1, 4096), device=device)
+            stacked_states = torch.zeros((batch_size, 4096), device=device)
 
         valid_mask = torch.tensor(valid_mask, dtype=torch.bool, device=device)
         interp_weights = torch.tensor(interp_weights, dtype=torch.float32, device=device)
@@ -383,12 +387,16 @@ class TeacherHiddenStateLoader:
         self.cache = {}
         self._h5_file = None
 
-    def load_episode(self, episode_idx: int) -> Dict[int, torch.Tensor]:
+    def load_episode(self, episode_idx: int, aggregation_method: AggregationMethod = AggregationMethod.LAST) -> Dict[int, torch.Tensor]:
         """
-        Load all teacher hidden states for a specific episode.
+        Load all teacher hidden states for a specific episode and aggregate each sequence.
+
+        Args:
+            episode_idx: Episode index to load
+            aggregation_method: How to aggregate sequences (LAST token or MEAN of all tokens)
 
         Returns:
-            Dict mapping frame indices to hidden states [seq_len, 4096] as torch tensors on CPU
+            Dict mapping frame indices to aggregated hidden states [4096] as torch tensors on CPU
         """
         cache_key = f"episode_{episode_idx}"
         if cache_key in self.cache:
@@ -412,11 +420,19 @@ class TeacherHiddenStateLoader:
                     seq_len = f["seq_lengths"][sample_idx]
                     frame_idx = int(f["frame_indices"][sample_idx])
 
-                    # Reshape and convert to tensor
+                    # Reshape to sequence form
                     hidden_state_2d = hidden_state_flat.reshape(seq_len, 4096)
                     hidden_state_tensor = torch.from_numpy(hidden_state_2d).float()
 
-                    episode_states[frame_idx] = hidden_state_tensor
+                    # Aggregate sequence to single representation
+                    if aggregation_method == AggregationMethod.LAST:
+                        aggregated = hidden_state_tensor[-1, :]  # Take last token [4096]
+                    elif aggregation_method == AggregationMethod.MEAN:
+                        aggregated = hidden_state_tensor.mean(dim=0)  # Average all tokens [4096]
+                    else:
+                        raise ValueError(f"Unknown aggregation method: {aggregation_method}")
+
+                    episode_states[frame_idx] = aggregated
 
         except Exception as e:
             print(f"Error loading teacher hidden states from {self.h5_file_path}: {e}")
@@ -427,7 +443,8 @@ class TeacherHiddenStateLoader:
         return episode_states
 
     def get_batch_teacher_states(
-        self, episode_indices: np.ndarray, frame_indices: np.ndarray
+        self, episode_indices: np.ndarray, frame_indices: np.ndarray,
+        aggregation_method: AggregationMethod = AggregationMethod.LAST
     ) -> Tuple[Dict[int, torch.Tensor], np.ndarray]:
         """
         Get teacher hidden states for a batch of samples.
@@ -435,14 +452,15 @@ class TeacherHiddenStateLoader:
         Args:
             episode_indices: [batch_size] episode indices
             frame_indices: [batch_size] frame indices
+            aggregation_method: How to aggregate sequences (LAST or MEAN)
 
         Returns:
-            teacher_states: Dict mapping frame indices to hidden states
+            teacher_states: Dict mapping frame indices to aggregated hidden states [4096]
             batch_frame_indices: [batch_size] frame indices for the batch
         """
         # For now, assume all samples in batch are from same episode
         # In practice, you may want to handle mixed episodes
         episode_idx = int(episode_indices[0])
-        teacher_states = self.load_episode(episode_idx)
+        teacher_states = self.load_episode(episode_idx, aggregation_method)
 
         return teacher_states, frame_indices
