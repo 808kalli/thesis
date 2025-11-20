@@ -253,7 +253,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         )
 
     # Determine checkpoint directory for resumption
-    checkpoint_dir = cfg.resume_from_checkpoint if cfg.resume_from_checkpoint is not None else run_dir
+    checkpoint_dir = run_dir
 
     # Quantization Config =>> only if LoRA fine-tuning
     quantization_config = None
@@ -436,6 +436,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                     # Hidden states are [batch_size, seq_len, 4096]
                     student_hidden_states_full = output.hidden_states[-1]  # Get last layer
                     print(f"Student hidden states shape: {student_hidden_states_full.shape}")
+                    raise RuntimeError(f"DEBUG: Stopping here to check hidden dims. Shape: {student_hidden_states_full.shape}")
 
                     # Get batch metadata for frame/episode indices
                     batch_size = student_hidden_states_full.shape[0]
