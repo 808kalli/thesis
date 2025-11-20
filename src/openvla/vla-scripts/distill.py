@@ -439,27 +439,6 @@ def finetune(cfg: FinetuneConfig) -> None:
                 episode_indices, frame_indices
             )
 
-            # DEBUG: Print teacher states dict info and raise error
-            if batch_idx == 0:  # Only on first batch
-                debug_msg = "\n" + "="*80 + "\n"
-                debug_msg += "DEBUG: Teacher States Dict Info\n"
-                debug_msg += "="*80 + "\n"
-                debug_msg += f"Number of frames in dict: {len(teacher_states_dict)}\n"
-                debug_msg += f"Frame indices in dict: {sorted(teacher_states_dict.keys())}\n"
-                debug_msg += f"Batch frame indices: {batch_frame_indices}\n"
-                if teacher_states_dict:
-                    first_frame_idx = list(teacher_states_dict.keys())[0]
-                    first_state = teacher_states_dict[first_frame_idx]
-                    debug_msg += f"\nFirst teacher state (frame {first_frame_idx}):\n"
-                    debug_msg += f"  Shape: {first_state.shape}\n"
-                    debug_msg += f"  Min: {first_state.min():.6f}, Max: {first_state.max():.6f}\n"
-                    debug_msg += f"  Data: {first_state}\n"
-                    debug_msg += f"\nAll frames' first sample (first dimension):\n"
-                    for frame_idx in sorted(teacher_states_dict.keys())[:5]:  # Show first 5 frames
-                        state = teacher_states_dict[frame_idx]
-                        debug_msg += f"  Frame {frame_idx}: {state[0] if state.shape[0] > 0 else 'empty'}\n"
-                raise RuntimeError(debug_msg)
-
             if teacher_states_dict:
                 # Align frames and get valid mask
                 teacher_states_full, valid_mask, interp_weights = frame_alignment_strategy.align(
