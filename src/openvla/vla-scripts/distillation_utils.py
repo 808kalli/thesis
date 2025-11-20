@@ -314,6 +314,10 @@ class SimilarityMatrixDistillationLoss(nn.Module):
         """
         batch_size = student_hidden_states.size(0)
 
+        # Convert to float32 for loss computation (handle BFloat16/Float16 inputs)
+        student_hidden_states = student_hidden_states.float()
+        teacher_hidden_states = teacher_hidden_states.float()
+
         # Optional projection
         if self.projection is not None:
             student_hidden_states = self.projection(student_hidden_states)
