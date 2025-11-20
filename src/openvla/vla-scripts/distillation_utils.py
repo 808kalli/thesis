@@ -115,6 +115,7 @@ class SimilarityMatrixDistillationLoss(nn.Module):
         teacher_hidden_dim: int = 4096,
         temperature: float = 1.0,
         normalize: bool = True,
+        mask_diagonal: bool = True,
         projection_dim: Optional[int] = None,
     ):
         """
@@ -123,11 +124,13 @@ class SimilarityMatrixDistillationLoss(nn.Module):
             teacher_hidden_dim: Dimension of teacher hidden states
             temperature: Temperature for softmax (higher = softer)
             normalize: Whether to L2 normalize before computing similarity
+            mask_diagonal: Whether to mask diagonal with -inf (softmax will give 0)
             projection_dim: If specified, project to this dimension before similarity computation
         """
         super().__init__()
         self.temperature = temperature
         self.normalize = normalize
+        self.mask_diagonal = mask_diagonal
 
         # Optional projection layer to match dimensions
         self.projection = None
@@ -170,11 +173,12 @@ class SimilarityMatrixDistillationLoss(nn.Module):
         student_sim = torch.mm(student_hidden_states, student_hidden_states.t())  # [batch, batch]
         teacher_sim = torch.mm(teacher_hidden_states, teacher_hidden_states.t())  # [batch, batch]
 
-        # Mask out diagonal (self-similarity is always 1.0, not informative)
+        # Optionally mask out diagonal (self-similarity is always 1.0, not informative)
         # Focus on inter-sample relationships instead
-        mask = torch.eye(batch_size, device=student_sim.device, dtype=torch.bool)
-        student_sim = student_sim.masked_fill(mask, float('-inf'))
-        teacher_sim = teacher_sim.masked_fill(mask, float('-inf'))
+        if self.mask_diagonal:
+            mask = torch.eye(batch_size, device=student_sim.device, dtype=torch.bool)
+            student_sim = student_sim.masked_fill(mask, float('-inf'))
+            teacher_sim = teacher_sim.masked_fill(mask, float('-inf'))
 
         # Apply temperature scaling
         student_sim = student_sim / self.temperature

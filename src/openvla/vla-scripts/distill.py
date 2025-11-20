@@ -101,6 +101,7 @@ class FinetuneConfig:
     frame_alignment_mode: str = "interpolated"                   # Frame alignment: "supervised_only" or "interpolated"
     distill_temperature: float = 1.0                                # Temperature for similarity matrix softmax
     distill_normalize: bool = True                                  # Whether to L2 normalize before similarity computation
+    distill_mask_diagonal: bool = True                              # Whether to mask diagonal in similarity matrix (self-similarity)
     distill_projection_dim: Optional[int] = None                    # Optional projection dimension for hidden states
 
     # Tracking Parameters
@@ -304,6 +305,8 @@ def finetune(cfg: FinetuneConfig) -> None:
         print(f"Initializing knowledge distillation...")
         print(f"  - Teacher Dataset H5: {cfg.teacher_dataset_h5_path}")
         print(f"  - Distill Weight: {cfg.distill_weight}")
+        print(f"  - Temperature: {cfg.distill_temperature}")
+        print(f"  - Mask Diagonal: {cfg.distill_mask_diagonal}")
 
     # Load precomputed teacher dataset (already aggregated and aligned)
     import h5py
@@ -326,6 +329,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         teacher_hidden_dim=4096,
         temperature=cfg.distill_temperature,
         normalize=cfg.distill_normalize,
+        mask_diagonal=cfg.distill_mask_diagonal,
         projection_dim=cfg.distill_projection_dim,
     ).to(device_id)
 
