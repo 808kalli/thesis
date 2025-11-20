@@ -300,64 +300,56 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Create Action Tokenizer
     action_tokenizer = ActionTokenizer(processor.tokenizer)
 
-    # Initialize Distillation Components (if enabled)
-    distillation_loss_fn = None
-    sequence_aggregation_student = None
-    sequence_aggregation_teacher = None
-    frame_alignment_strategy = None
-    teacher_hidden_state_loader = None
+    # Initialize Distillation Components
+    if cfg.teacher_h5_path is None:
+        raise ValueError("use_distillation=True but teacher_h5_path is not specified!")
 
-    if cfg.use_distillation:
-        if cfg.teacher_h5_path is None:
-            raise ValueError("use_distillation=True but teacher_h5_path is not specified!")
+    if distributed_state.is_main_process:
+        print(f"Initializing knowledge distillation...")
+        print(f"  - Teacher H5: {cfg.teacher_h5_path}")
+        print(f"  - Aggregation Method: {cfg.aggregation_method}")
+        print(f"  - Frame Alignment: {cfg.frame_alignment_mode}")
+        print(f"  - Distill Weight: {cfg.distill_weight}")
 
-        if distributed_state.is_main_process:
-            print(f"Initializing knowledge distillation...")
-            print(f"  - Teacher H5: {cfg.teacher_h5_path}")
-            print(f"  - Aggregation Method: {cfg.aggregation_method}")
-            print(f"  - Frame Alignment: {cfg.frame_alignment_mode}")
-            print(f"  - Distill Weight: {cfg.distill_weight}")
+    # Initialize teacher hidden state loader
+    teacher_hidden_state_loader = TeacherHiddenStateLoader(str(cfg.teacher_h5_path))
 
-        # Initialize teacher hidden state loader
-        teacher_hidden_state_loader = TeacherHiddenStateLoader(str(cfg.teacher_h5_path))
+    # Initialize sequence aggregation modules
+    aggregation_enum = AggregationMethod(cfg.aggregation_method)
 
-        # Initialize sequence aggregation modules
-        aggregation_enum = AggregationMethod(cfg.aggregation_method)
+    # Student: aggregation + bottleneck MLP (4096 → 2048 → 4096)
+    sequence_aggregation_student = StudentSequenceProjectionMLP(
+        input_dim=4096,
+        bottleneck_dim=2048,
+        aggregation_method=aggregation_enum,
+    ).to(device_id)
 
-        # Student: aggregation + bottleneck MLP (4096 → 2048 → 4096)
-        sequence_aggregation_student = StudentSequenceProjectionMLP(
-            input_dim=4096,
-            bottleneck_dim=2048,
-            aggregation_method=aggregation_enum,
-        ).to(device_id)
+    # Teacher: pure aggregation (no MLP)
+    sequence_aggregation_teacher = SequenceAggregationMLP(
+        hidden_dim=4096,
+        aggregation_method=aggregation_enum,
+    ).to(device_id)
 
-        # Teacher: pure aggregation (no MLP)
-        sequence_aggregation_teacher = SequenceAggregationMLP(
-            hidden_dim=4096,
-            aggregation_method=aggregation_enum,
-        ).to(device_id)
+    # Initialize frame alignment strategy
+    frame_alignment_enum = FrameAlignmentMode(cfg.frame_alignment_mode)
+    frame_alignment_strategy = FrameAlignmentStrategy(mode=frame_alignment_enum, teacher_stride=12)
 
-        # Initialize frame alignment strategy
-        frame_alignment_enum = FrameAlignmentMode(cfg.frame_alignment_mode)
-        frame_alignment_strategy = FrameAlignmentStrategy(mode=frame_alignment_enum, teacher_stride=12)
-
-        # Initialize distillation loss
-        distillation_loss_fn = SimilarityMatrixDistillationLoss(
-            student_hidden_dim=4096,
-            teacher_hidden_dim=4096,
-            temperature=cfg.distill_temperature,
-            normalize=cfg.distill_normalize,
-            projection_dim=cfg.distill_projection_dim,
-        ).to(device_id)
+    # Initialize distillation loss
+    distillation_loss_fn = SimilarityMatrixDistillationLoss(
+        student_hidden_dim=4096,
+        teacher_hidden_dim=4096,
+        temperature=cfg.distill_temperature,
+        normalize=cfg.distill_normalize,
+        projection_dim=cfg.distill_projection_dim,
+    ).to(device_id)
 
     # Create Optimizer =>> note that we default to a simple constant learning rate!
     # IMPORTANT: Must be after distillation module initialization so their parameters are included
     trainable_params = [param for param in vla.parameters() if param.requires_grad]
 
-    # Add distillation module parameters to optimizer if enabled
-    if cfg.use_distillation:
-        trainable_params.extend(sequence_aggregation_student.parameters())
-        trainable_params.extend(distillation_loss_fn.parameters())
+    # Add distillation module parameters to optimizer
+    trainable_params.extend(sequence_aggregation_student.parameters())
+    trainable_params.extend(distillation_loss_fn.parameters())
 
     optimizer = AdamW(trainable_params, lr=cfg.learning_rate)
 
@@ -382,7 +374,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     )
 
     # [Important] Save Dataset Statistics =>> used to de-normalize actions for inference!
-    if distributed_state.is_main_process and not cfg.resume:
+    if distributed_state.is_main_process:
         save_dataset_statistics(vla_dataset.dataset_statistics, run_dir)
 
     # Create Collator and DataLoader
@@ -423,65 +415,54 @@ def finetune(cfg: FinetuneConfig) -> None:
                 )
                 action_loss = output.loss
 
-            # Compute distillation loss if enabled
-            distill_loss = None
-            if cfg.use_distillation and distillation_loss_fn is not None:
-                try:
-                    # Extract student hidden states from model output
-                    # Hidden states are [batch_size, seq_len, 4096]
-                    student_hidden_states_full = output.hidden_states[-1]  # Get last layer
-                    print(f"Student hidden states shape: {student_hidden_states_full.shape}")
-                    raise RuntimeError(f"DEBUG: Stopping here to check hidden dims. Shape: {student_hidden_states_full.shape}")
+            # Compute distillation loss
+            # Extract student hidden states from model output
+            # Hidden states are [batch_size, seq_len, 4096]
+            student_hidden_states_full = output.hidden_states[-1]  # Get last layer
+            print(f"Student hidden states shape: {student_hidden_states_full.shape}")
+            raise RuntimeError(f"DEBUG: Stopping here to check hidden dims. Shape: {student_hidden_states_full.shape}")
 
-                    # Get batch metadata for frame/episode indices
-                    batch_size = student_hidden_states_full.shape[0]
-                    episode_indices = batch.get("episode_indices", np.zeros(batch_size, dtype=np.int32))
-                    frame_indices = batch.get("frame_indices", np.zeros(batch_size, dtype=np.int32))
+            # Get batch metadata for frame/episode indices
+            batch_size = student_hidden_states_full.shape[0]
+            episode_indices = batch.get("episode_indices", np.zeros(batch_size, dtype=np.int32))
+            frame_indices = batch.get("frame_indices", np.zeros(batch_size, dtype=np.int32))
 
-                    if not isinstance(episode_indices, np.ndarray):
-                        episode_indices = np.array(episode_indices)
-                    if not isinstance(frame_indices, np.ndarray):
-                        frame_indices = np.array(frame_indices)
+            if not isinstance(episode_indices, np.ndarray):
+                episode_indices = np.array(episode_indices)
+            if not isinstance(frame_indices, np.ndarray):
+                frame_indices = np.array(frame_indices)
 
-                    # Load teacher hidden states for this batch
-                    teacher_states_dict, batch_frame_indices = teacher_hidden_state_loader.get_batch_teacher_states(
-                        episode_indices, frame_indices
+            # Load teacher hidden states for this batch
+            teacher_states_dict, batch_frame_indices = teacher_hidden_state_loader.get_batch_teacher_states(
+                episode_indices, frame_indices
+            )
+
+            if teacher_states_dict:
+                # Align frames and get valid mask
+                teacher_states_full, valid_mask, interp_weights = frame_alignment_strategy.align(
+                    batch_frame_indices, teacher_states_dict
+                )
+                teacher_states_full = teacher_states_full.to(device_id)
+                valid_mask = valid_mask.to(device_id)
+
+                # Aggregate sequences to single representations
+                student_hidden_aggregated = sequence_aggregation_student(student_hidden_states_full)
+                teacher_hidden_aggregated = sequence_aggregation_teacher(teacher_states_full)
+
+                # Compute KL divergence loss on similarity matrices
+                with torch.autocast("cuda", dtype=torch.float32):  # Use full precision for loss
+                    distill_loss = distillation_loss_fn(
+                        student_hidden_aggregated,
+                        teacher_hidden_aggregated,
+                        valid_mask=valid_mask,
                     )
-
-                    if teacher_states_dict:
-                        # Align frames and get valid mask
-                        teacher_states_full, valid_mask, interp_weights = frame_alignment_strategy.align(
-                            batch_frame_indices, teacher_states_dict
-                        )
-                        teacher_states_full = teacher_states_full.to(device_id)
-                        valid_mask = valid_mask.to(device_id)
-
-                        # Aggregate sequences to single representations
-                        student_hidden_aggregated = sequence_aggregation_student(student_hidden_states_full)
-                        teacher_hidden_aggregated = sequence_aggregation_teacher(teacher_states_full)
-
-                        # Compute KL divergence loss on similarity matrices
-                        with torch.autocast("cuda", dtype=torch.float32):  # Use full precision for loss
-                            distill_loss = distillation_loss_fn(
-                                student_hidden_aggregated,
-                                teacher_hidden_aggregated,
-                                valid_mask=valid_mask,
-                            )
-                    else:
-                        if distributed_state.is_main_process:
-                            print("⚠️  Warning: No teacher hidden states loaded for batch")
-                        distill_loss = torch.tensor(0.0, device=device_id)
-
-                except Exception as e:
-                    if distributed_state.is_main_process:
-                        print(f"⚠️  Error computing distillation loss: {e}")
-                    distill_loss = torch.tensor(0.0, device=device_id)
+            else:
+                if distributed_state.is_main_process:
+                    print("⚠️  Warning: No teacher hidden states loaded for batch")
+                distill_loss = torch.tensor(0.0, device=device_id)
 
             # Combine losses
-            if distill_loss is not None and cfg.use_distillation:
-                total_loss = action_loss + cfg.distill_weight * distill_loss
-            else:
-                total_loss = action_loss
+            total_loss = action_loss + cfg.distill_weight * distill_loss
 
             # Normalize loss to account for gradient accumulation
             normalized_loss = total_loss / cfg.grad_accumulation_steps
@@ -512,8 +493,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             recent_losses.append(action_loss.item())
             recent_action_accuracies.append(action_accuracy.item())
             recent_l1_losses.append(action_l1_loss.item())
-            if distill_loss is not None:
-                recent_distill_losses.append(distill_loss.item() if isinstance(distill_loss, torch.Tensor) else distill_loss)
+            recent_distill_losses.append(distill_loss.item() if isinstance(distill_loss, torch.Tensor) else distill_loss)
 
             # Compute gradient step index
             gradient_step_idx = batch_idx // cfg.grad_accumulation_steps
@@ -532,8 +512,8 @@ def finetune(cfg: FinetuneConfig) -> None:
                 "l1_loss": smoothened_l1_loss,
             }
 
-            # Add distillation metrics if enabled
-            if cfg.use_distillation and len(recent_distill_losses) > 0:
+            # Add distillation metrics
+            if len(recent_distill_losses) > 0:
                 smoothened_distill_loss = sum(recent_distill_losses) / len(recent_distill_losses)
                 log_dict["distill_loss"] = smoothened_distill_loss
                 log_dict["total_loss"] = smoothened_loss + cfg.distill_weight * smoothened_distill_loss
