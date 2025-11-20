@@ -412,6 +412,11 @@ def finetune(cfg: FinetuneConfig) -> None:
 
             # Get batch metadata for frame/episode indices
             batch_size = student_hidden_states_full.shape[0]
+
+            # Debug: show all keys in batch on first batch
+            if batch_idx == 0:
+                raise RuntimeError(f"DEBUG: Batch keys = {list(batch.keys())}")
+
             episode_indices = batch.get("episode_index", None)
             frame_indices = batch.get("frame_index", None)
 
