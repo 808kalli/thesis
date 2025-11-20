@@ -79,6 +79,10 @@ class OpenvlaLiberoSpatial(tfds.core.GeneratorBasedBuilder):
                         doc='Kona language embedding. '
                             'See https://tfhub.dev/google/universal-sentence-encoder-large/5'
                     ),
+                    'global_index': tfds.features.Scalar(
+                        dtype=np.int32,
+                        doc='Global index into the flattened dataset (for knowledge distillation tracking).'
+                    ),
                 }),
                 'episode_metadata': tfds.features.FeaturesDict({
                     'file_path': tfds.features.Text(
@@ -99,7 +103,7 @@ class OpenvlaLiberoSpatial(tfds.core.GeneratorBasedBuilder):
     def _split_generators(self, dl_manager: tfds.download.DownloadManager):
         """Define data splits."""
         return {
-            'train': self._generate_examples(path='data/train_100eps/episode_*.npy'),
+            'train': self._generate_examples(path='data/train_supervised/episode_*.npy'),
             # 'val': self._generate_examples(path='data/val/episode_*.npy'),
         }
 
@@ -109,23 +113,24 @@ class OpenvlaLiberoSpatial(tfds.core.GeneratorBasedBuilder):
         def _parse_example(episode_path):
             # Load raw data
             data = np.load(episode_path, allow_pickle=True).item()
-            
+
             # Extract episode-level data
             actions = data['action']  # shape: (num_steps, 7)
             observations = data['observation']  # dict with arrays
             language_instruction = data['language_instruction']  # string
             episode_metadata = data['episode_metadata']  # dict
-            
+            global_indices = data['global_indices']  # Global indices (required for distillation tracking)
+
             # Compute language embedding once for the whole episode
             language_embedding = self._embed([language_instruction])[0].numpy()
-            
+
             # Get number of steps
             num_steps = len(actions)
-            
+
             # Assemble episode
             episode = []
             for i in range(num_steps):
-                episode.append({
+                step = {
                     'observation': {
                         'image': observations['image'][i],
                         'wrist_image': observations['wrist_image'][i],
@@ -139,7 +144,10 @@ class OpenvlaLiberoSpatial(tfds.core.GeneratorBasedBuilder):
                     'is_terminal': i == (num_steps - 1),
                     'language_instruction': language_instruction,
                     'language_embedding': language_embedding,
-                })
+                    'global_index': int(global_indices[i]),
+                }
+
+                episode.append(step)
             
             # Create output data sample
             sample = {

@@ -64,7 +64,11 @@ class RLDSBatchTransform:
         if not self.predict_stop_token:
             labels[-1] = IGNORE_INDEX
 
-        return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels, dataset_name=dataset_name)
+        # Include global_index if present (for knowledge distillation tracking)
+        output = dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels, dataset_name=dataset_name)
+        if "global_index" in rlds_batch:
+            output["global_indices"] = rlds_batch["global_index"]
+        return output
 
 
 class RLDSDataset(IterableDataset):

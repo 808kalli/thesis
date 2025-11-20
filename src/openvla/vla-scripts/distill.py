@@ -395,7 +395,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             if batch_idx < start_batch_idx:
                 continue
 
-            # DEBUG: Print first batch structure
+            # DEBUG: Print first batch structure to verify global_indices field
             if batch_idx == 0:
                 debug_batch_msg = f"\n{'='*80}\nFIRST BATCH (batch_idx=0) FIELDS:\n"
                 debug_batch_msg += f"Batch keys: {list(batch.keys())}\n"
@@ -426,21 +426,22 @@ def finetune(cfg: FinetuneConfig) -> None:
             # Hidden states are [batch_size, seq_len, 4096]
             student_hidden_states_full = output.hidden_states[-1]  # Get last layer
 
-            # Load precomputed teacher hidden states
-            # Since both student and teacher use the same dataset in the same order,
-            # we can directly index into the teacher H5 using sample indices
+            # Load precomputed teacher hidden states using global indices from batch
             batch_size = student_hidden_states_full.shape[0]
 
-            # Collect teacher states for this batch
+            # Get global indices from batch (required for proper teacher state alignment)
+            global_indices = batch["global_indices"].cpu().numpy()
+
+            # Collect teacher states for this batch using global indices
             teacher_hidden_aggregated_list = []
             valid_mask_list = []
 
-            for sample_idx in range(batch_idx * batch_size, (batch_idx + 1) * batch_size):
-                # Direct indexing: sample_idx directly corresponds to H5 row
+            for global_idx in global_indices:
+                # Index into teacher H5 using the actual global index from the dataset
                 teacher_state = torch.from_numpy(
-                    np.array(teacher_dataset_file["teacher_states"][sample_idx], dtype=np.float32)
+                    np.array(teacher_dataset_file["teacher_states"][int(global_idx)], dtype=np.float32)
                 )
-                has_supervision = bool(teacher_dataset_file["has_supervision"][sample_idx])
+                has_supervision = bool(teacher_dataset_file["has_supervision"][int(global_idx)])
 
                 teacher_hidden_aggregated_list.append(teacher_state)
                 valid_mask_list.append(has_supervision)

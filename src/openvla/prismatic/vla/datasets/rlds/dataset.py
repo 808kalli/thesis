@@ -557,6 +557,10 @@ def make_interleaved_dataset(
             num_parallel_calls=threads,
             train=train,
         ).flatten(num_parallel_calls=threads)
+
+        # Add global index enumeration for knowledge distillation tracking
+        dataset = dataset.enumerate().map(lambda idx, sample: {**sample, "global_index": idx})
+
         dataset = apply_per_dataset_frame_transforms(dataset, **dataset_frame_transform_kwargs)
         datasets.append(dataset)
 

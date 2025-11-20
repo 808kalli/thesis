@@ -106,6 +106,12 @@ class PaddedCollatorForActionPrediction:
         else:
             dataset_names = None
 
+        # Extract global_indices if present (for knowledge distillation tracking)
+        if "global_indices" in instances[0]:
+            global_indices = [instance["global_indices"] for instance in instances]
+        else:
+            global_indices = None
+
         # For now, we only support Tokenizers with `padding_side = "right"` during training
         #   => Handle padding via RNN Utils => `pad_sequence`
         assert self.padding_side == "right", f"Invalid Tokenizer `{self.padding_side = }`"
@@ -139,4 +145,6 @@ class PaddedCollatorForActionPrediction:
         )
         if dataset_names is not None:
             output["dataset_names"] = dataset_names
+        if global_indices is not None:
+            output["global_indices"] = torch.tensor(global_indices, dtype=torch.long)
         return output
