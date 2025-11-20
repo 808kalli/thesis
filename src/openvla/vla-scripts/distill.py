@@ -103,7 +103,7 @@ class FinetuneConfig:
     distill_weight: float = 0.1                                     # Weight of distillation loss in total loss
     aggregation_method: str = "mean"                                # How to aggregate sequence: "last" or "mean"
     frame_alignment_mode: str = "interpolated"                   # Frame alignment: "supervised_only" or "interpolated"
-    distill_temperature: float = 4.0                                # Temperature for similarity matrix softmax
+    distill_temperature: float = 1.0                                # Temperature for similarity matrix softmax
     distill_normalize: bool = True                                  # Whether to L2 normalize before similarity computation
     distill_projection_dim: Optional[int] = None                    # Optional projection dimension for hidden states
 
