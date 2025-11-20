@@ -26,16 +26,18 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import tqdm
+import argparse
 from typing import Dict, Tuple
 
 # Paths
 TEACHER_H5 = Path("/home/elias/Thesis/lapa_hidden_states.h5")
 DATASET_DIR = Path("/home/elias/Thesis/raw_datasets/libero_spatial_noops")
 OUTPUT_FILE = Path("/home/elias/Thesis/teacher_dataset_interpolated.h5")
+OUTPUT_FILE_SUPERVISED = Path("/home/elias/Thesis/teacher_dataset_supervised.h5")
 
 TEACHER_STRIDE = 12  # Frames are sampled every 12 (0, 12, 24, ...)
 HIDDEN_DIM = 4096
-AGGREGATION_METHOD = "last"  # Options: "last" or "mean"
+AGGREGATION_METHOD = "mean"  # Options: "last" or "mean"
 
 
 def aggregate_sequence(seq: np.ndarray, method: str = "last") -> np.ndarray:
@@ -248,6 +250,60 @@ def main():
         print(f"  - {interpolated_count} interpolated")
         print(f"  Output: {OUTPUT_FILE}")
 
+    # Create supervised-only dataset
+    create_supervised_only_dataset(OUTPUT_FILE, OUTPUT_FILE_SUPERVISED)
+
+
+def create_supervised_only_dataset(interpolated_file: Path, output_file: Path):
+    """
+    Create a new H5 file containing only the supervised frames (directly sampled from teacher).
+    These are the frames with has_supervision=True, corresponding to the original LAPA frames.
+    """
+    print(f"\nCreating supervised-only dataset...")
+    print(f"  Reading from: {interpolated_file}")
+    print(f"  Writing to: {output_file}")
+
+    with h5py.File(interpolated_file, "r") as in_f, \
+         h5py.File(output_file, "w") as out_f:
+
+        # Read all data
+        teacher_states = in_f["teacher_states"][:]
+        global_indices = in_f["global_indices"][:]
+        has_supervision = in_f["has_supervision"][:]
+
+        # Filter to only supervised frames
+        supervised_mask = has_supervision
+        supervised_states = teacher_states[supervised_mask]
+        supervised_global_indices = global_indices[supervised_mask]
+
+        # Create output datasets
+        out_f.create_dataset("teacher_states", data=supervised_states.astype(np.float32),
+                            dtype=np.float32, compression="gzip")
+        out_f.create_dataset("global_indices", data=supervised_global_indices.astype(np.int32),
+                            dtype=np.int32, compression="gzip")
+
+        print(f"\n✓ Created supervised-only dataset")
+        print(f"  Total samples: {len(supervised_states)}")
+        print(f"  Shape: {supervised_states.shape}")
+        print(f"  Global indices range: {supervised_global_indices.min()} to {supervised_global_indices.max()}")
+        print(f"  Output: {output_file}")
+
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Precompute teacher dataset with aggregation and interpolation"
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["interpolated", "supervised", "both"],
+        default="both",
+        help="Which dataset to create: 'interpolated' (all frames), 'supervised' (original frames only), or 'both' (default)"
+    )
+    args = parser.parse_args()
+
+    if args.mode in ["interpolated", "both"]:
+        main()
+
+    if args.mode in ["supervised", "both"]:
+        create_supervised_only_dataset(OUTPUT_FILE, OUTPUT_FILE_SUPERVISED)

@@ -395,6 +395,22 @@ def finetune(cfg: FinetuneConfig) -> None:
             if batch_idx < start_batch_idx:
                 continue
 
+            # DEBUG: Print first batch structure
+            if batch_idx == 0:
+                debug_batch_msg = f"\n{'='*80}\nFIRST BATCH (batch_idx=0) FIELDS:\n"
+                debug_batch_msg += f"Batch keys: {list(batch.keys())}\n"
+                for key in batch.keys():
+                    if isinstance(batch[key], torch.Tensor):
+                        debug_batch_msg += f"  {key}: shape={batch[key].shape}, dtype={batch[key].dtype}\n"
+                    elif isinstance(batch[key], (list, tuple)):
+                        debug_batch_msg += f"  {key}: type={type(batch[key])}, len={len(batch[key])}\n"
+                        if len(batch[key]) > 0 and hasattr(batch[key][0], '__len__'):
+                            debug_batch_msg += f"    First element: {batch[key][0]}\n"
+                    else:
+                        debug_batch_msg += f"  {key}: type={type(batch[key])}, value={batch[key]}\n"
+                debug_batch_msg += f"{'='*80}\n"
+                raise RuntimeError(debug_batch_msg)
+
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output: CausalLMOutputWithPast = vla(
                     input_ids=batch["input_ids"].to(device_id),
