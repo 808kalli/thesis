@@ -266,7 +266,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Load OpenVLA Processor and Model using HF AutoClasses
     # If resuming, load from checkpoint; otherwise load from original model
-    model_path = checkpoint_dir if cfg.resume else cfg.vla_path
+    model_path = cfg.vla_path
     processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
     vla = AutoModelForVision2Seq.from_pretrained(
         model_path,
@@ -310,8 +310,6 @@ def finetune(cfg: FinetuneConfig) -> None:
     if cfg.use_distillation:
         if cfg.teacher_h5_path is None:
             raise ValueError("use_distillation=True but teacher_h5_path is not specified!")
-
-        raise RuntimeError(f"DEBUG: cfg.use_distillation={cfg.use_distillation}, cfg.teacher_h5_path={cfg.teacher_h5_path}")
 
         if distributed_state.is_main_process:
             print(f"Initializing knowledge distillation...")
