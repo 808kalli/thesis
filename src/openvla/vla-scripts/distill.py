@@ -415,17 +415,9 @@ def finetune(cfg: FinetuneConfig) -> None:
             # we can directly index into the teacher H5 using sample indices
             batch_size = student_hidden_states_full.shape[0]
 
-            # On first batch, load global indices from teacher H5 for debugging
-            if batch_idx == 0:
-                teacher_global_indices = teacher_dataset_file["global_indices"][:]
-
             # Collect teacher states for this batch
             teacher_hidden_aggregated_list = []
             valid_mask_list = []
-
-            # Debug: collect indices fetched from teacher H5
-            debug_student_indices = []
-            debug_teacher_global_indices = []
 
             for sample_idx in range(batch_idx * batch_size, (batch_idx + 1) * batch_size):
                 # Direct indexing: sample_idx directly corresponds to H5 row
@@ -436,19 +428,6 @@ def finetune(cfg: FinetuneConfig) -> None:
 
                 teacher_hidden_aggregated_list.append(teacher_state)
                 valid_mask_list.append(has_supervision)
-
-                if batch_idx == 0:
-                    debug_student_indices.append(sample_idx)
-                    debug_teacher_global_indices.append(int(teacher_global_indices[sample_idx]))
-
-            # Debug output for first batch
-            if batch_idx == 0:
-                raise RuntimeError(
-                    f"DEBUG BATCH 0:\n"
-                    f"  Student dataset indices used: {debug_student_indices}\n"
-                    f"  Teacher global_indices fetched: {debug_teacher_global_indices}\n"
-                    f"  Match? {debug_student_indices == debug_teacher_global_indices}"
-                )
 
             teacher_hidden_aggregated = torch.stack(teacher_hidden_aggregated_list).to(device_id)
             valid_mask = torch.tensor(valid_mask_list, dtype=torch.bool).to(device_id)
