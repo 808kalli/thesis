@@ -456,8 +456,8 @@ def finetune(cfg: FinetuneConfig) -> None:
                     log_file = hidden_state_dir / f"batch_{batch_idx:04d}.npz"
                     np.savez_compressed(
                         log_file,
-                        student_hidden=student_hidden_aggregated.detach().cpu().numpy(),
-                        teacher_hidden=teacher_hidden_aggregated.detach().cpu().numpy(),
+                        student_hidden=student_hidden_aggregated.detach().float().cpu().numpy(),
+                        teacher_hidden=teacher_hidden_aggregated.detach().float().cpu().numpy(),
                         batch_idx=batch_idx,
                         aggregation_method=cfg.aggregation_method,
                         batch_size=batch_size,
