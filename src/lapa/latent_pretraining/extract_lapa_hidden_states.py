@@ -132,32 +132,6 @@ def aggregate_sequence(seq: np.ndarray, method: str = "mean") -> np.ndarray:
         raise ValueError(f"Unknown aggregation: {method}")
 
 
-def build_global_index_map(libero_dataset_dir: Path):
-    """
-    Build mapping from (episode_idx, frame_idx) to global sequential index.
-
-    The dataset has a global 'index' column that's sequential 0..52969.
-    This allows us to look up the global sample index for any (episode, frame) pair.
-    """
-    print(f"Building global index map from: {libero_dataset_dir}")
-
-    data_dir = libero_dataset_dir / "data"
-    parquet_files = sorted(data_dir.glob("**/*.parquet"))
-
-    if not parquet_files:
-        raise FileNotFoundError(f"No parquet files found in {data_dir}")
-
-    index_map = {}
-
-    for pf in tqdm.tqdm(parquet_files, desc="Building global index map"):
-        df = pd.read_parquet(pf, columns=["index", "episode_index", "frame_index"])
-        for _, row in df.iterrows():
-            key = (int(row["episode_index"]), int(row["frame_index"]))
-            global_idx = int(row["index"])
-            index_map[key] = global_idx
-
-    print(f"✓ Built global index map with {len(index_map)} entries")
-    return index_map
 
 
 # ============================================================
@@ -363,9 +337,6 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     print("Initializing LAPA...")
     extractor = LAPAHiddenStateExtractor(cfg)
 
-    # Build global index map from dataset parquet files
-    global_index_map = build_global_index_map(dataset_dir)
-
     # Find parquet files without loading entire dataset
     print(f"\nDiscovering dataset structure from: {dataset_dir}")
     import glob
@@ -380,29 +351,29 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
 
     print(f"Found {len(parquet_files)} parquet files")
 
-    # Build episode index by reading parquet files in streaming mode
-    print(f"\nBuilding episode index (streaming)...")
-    episodes_metadata = {}  # episode_idx -> (parquet_file, row_indices, num_frames)
+    # Build episode index and global index map by reading parquet files in streaming mode
+    print(f"\nBuilding episode index and global index map (streaming)...")
+    episodes_metadata = {}  # episode_idx -> {task_index, max_frame_idx}
+    global_index_map = {}   # (episode_idx, frame_idx) -> global_idx
     total_records = 0
 
     for parquet_file in parquet_files:
-        # Read episode_index, task_index, and frame_index columns to build index
-        df = pd.read_parquet(parquet_file, columns=['episode_index', 'task_index', 'frame_index'])
+        # Read necessary columns
+        df = pd.read_parquet(parquet_file, columns=['episode_index', 'task_index', 'frame_index', 'index'])
         for idx, row in df.iterrows():
             episode_idx = int(row['episode_index'])
             task_idx = int(row['task_index'])
             frame_idx = int(row['frame_index'])
+            global_idx = int(row['index'])
+
             if episode_idx not in episodes_metadata:
                 episodes_metadata[episode_idx] = {
-                    'parquet_file': parquet_file,
-                    'indices': [],
                     'task_index': task_idx,
-                    'num_frames': 0,
                     'max_frame_idx': -1
                 }
-            episodes_metadata[episode_idx]['indices'].append(idx)
-            episodes_metadata[episode_idx]['num_frames'] += 1
+
             episodes_metadata[episode_idx]['max_frame_idx'] = max(episodes_metadata[episode_idx]['max_frame_idx'], frame_idx)
+            global_index_map[(episode_idx, frame_idx)] = global_idx
             total_records += 1
         del df  # Explicitly delete to free memory
 
@@ -432,7 +403,6 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
 
         # Get task description from metadata (no record loading needed)
         task_index = episode_meta['task_index']
-        num_frames = episode_meta['num_frames']
         max_frame_idx = episode_meta['max_frame_idx']
 
         if task_index < len(LIBERO_SPATIAL_TASKS):
