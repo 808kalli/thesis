@@ -36,7 +36,7 @@ Outputs:
     {output_dir}/lapa_hidden_states.h5 containing:
     - hidden_states: [total_samples, 4096] aggregated hidden states
     - episode_indices: [total_samples] episode IDs
-    - frame_indices: [total_samples] frame indices (0, 1, 2, ...)
+    - frame_indices: [total_samples] frame indices (sampled at stride intervals)
     - global_indices: [total_samples] global sequential indices into full dataset
     - task_descriptions: [total_samples] task description strings
 """
@@ -115,6 +115,7 @@ class ExtractLAPAConfig:
     multi_image: int = 1
     num_episodes: Optional[int] = None  # If set, only process first N episodes
     aggregation_method: str = "mean"  # How to aggregate: "last" (last token) or "mean" (mean of all)
+    frame_stride: int = 2  # Process every Nth frame (stride=1 for all, stride=2 for every 2nd, etc.)
 
     # Output parameters
     output_dir: Union[str, Path] = "lapa_hidden_states"
@@ -387,7 +388,7 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     print(f"Dataset directory: {dataset_dir}")
     print(f"Output directory: {output_dir}")
     print(f"Aggregation method: {cfg.aggregation_method}")
-    print(f"Processing ALL frames (no frame skipping)\n")
+    print(f"Frame stride: {cfg.frame_stride} (processing every {cfg.frame_stride}th frame)\n")
 
     # Load LAPA extractor
     print("Initializing LAPA...")
@@ -484,8 +485,8 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
         # Extract ALL frames from video in a single efficient pass (not per-frame)
         frames = extract_all_frames_from_video(video_path, max_frame_idx)
 
-        # Process frames in order: 0, 1, 2, ...
-        for frame_idx in range(max_frame_idx + 1):
+        # Process frames at stride intervals: 0, stride, 2*stride, ...
+        for frame_idx in range(0, max_frame_idx + 1, cfg.frame_stride):
             if frame_idx not in frames:
                 # Frame not extracted (shouldn't happen normally)
                 print(f"Warning: Frame {frame_idx} missing from episode {episode_idx}")
@@ -524,7 +525,7 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
         # Incremental save every N episodes to manage RAM
         if episode_count % save_interval == 0 and hidden_states_list:
             batch_count += 1
-            output_file = output_dir / "lapa_hidden_states_full.h5"
+            output_file = output_dir / f"lapa_hidden_states_stride_{cfg.frame_stride}.h5"
 
             try:
                 import h5py
