@@ -23,8 +23,7 @@ python latent_pretraining/extract_lapa_hidden_states.py \
     --seed 7
 
 Arguments:
-    --dataset_dir: Local path to libero_spatial dataset directory (lerobot format with videos)
-    --rlds_dataset_dir: Local path to libero_spatial_noops dataset directory (RLDS format for global_id mapping)
+    --dataset_dir: Local path to libero_spatial dataset directory (lerobot format with videos and parquet files)
     --output_dir: Directory to save hidden states HDF5 file
     --vqgan_checkpoint: Path to VQGAN checkpoint
     --load_checkpoint: Path to LAPA model checkpoint
@@ -93,8 +92,7 @@ class ExtractLAPAConfig:
     # fmt: off
 
     # Dataset parameters
-    dataset_dir: Union[str, Path] = "/path/to/libero_spatial"  # Lerobot format (with videos)
-    rlds_dataset_dir: Union[str, Path] = "/path/to/libero_spatial_noops"  # RLDS format (for global_id mapping)
+    dataset_dir: Union[str, Path] = "/path/to/libero_spatial"  # Lerobot format (has both videos and parquet with global indices)
 
     # LAPA model parameters (same as inference.py)
     vqgan_checkpoint: str = "lapa_checkpoints/vqgan"
@@ -348,20 +346,15 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     print("LAPA Aggregated Hidden State Extraction")
     print("="*70 + "\n")
 
-    # Validate dataset directories
+    # Validate dataset directory
     dataset_dir = Path(cfg.dataset_dir)
     if not dataset_dir.exists():
         raise FileNotFoundError(f"Dataset directory not found: {dataset_dir}")
 
-    rlds_dataset_dir = Path(cfg.rlds_dataset_dir)
-    if not rlds_dataset_dir.exists():
-        raise FileNotFoundError(f"RLDS dataset directory not found: {rlds_dataset_dir}")
-
     # Create output directory
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Dataset directory (lerobot): {dataset_dir}")
-    print(f"RLDS dataset directory: {rlds_dataset_dir}")
+    print(f"Dataset directory: {dataset_dir}")
     print(f"Output directory: {output_dir}")
     print(f"Aggregation method: {cfg.aggregation_method}")
     print(f"Processing ALL frames (no frame skipping)\n")
@@ -370,8 +363,8 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     print("Initializing LAPA...")
     extractor = LAPAHiddenStateExtractor(cfg)
 
-    # Build global index map from RLDS dataset
-    global_index_map = build_global_index_map(rlds_dataset_dir)
+    # Build global index map from dataset parquet files
+    global_index_map = build_global_index_map(dataset_dir)
 
     # Find parquet files without loading entire dataset
     print(f"\nDiscovering dataset structure from: {dataset_dir}")
