@@ -1,10 +1,13 @@
 """
 extract_lapa_hidden_states.py
 
-Extracts LAPA hidden states from Libero spatial dataset frames.
+Extracts aggregated LAPA hidden states from Libero spatial dataset frames.
 
-LAPA was trained on frames ~0.6 seconds apart. Since Libero has 0.05s increments,
-we sample every 12 frames (0.6 / 0.05 = 12) to match LAPA's training distribution.
+This script:
+1. Loads ALL frames from each episode (no frame skipping)
+2. Extracts hidden states from LAPA for each frame
+3. Aggregates sequence [seq_len, 4096] → [4096] using specified method
+4. Stores aggregated states with episode_id, frame_id, and global_id
 
 The dataset is from HuggingFace (lerobot format, parquet files):
 https://huggingface.co/datasets/aopolin-lv/libero_spatial_no_noops_lerobot_v21
@@ -15,24 +18,28 @@ python latent_pretraining/extract_lapa_hidden_states.py \
     --output_dir /workspace/thesis \
     --vqgan_checkpoint lapa_checkpoints/vqgan \
     --load_checkpoint params::lapa_checkpoints/params_sthv2 \
-    --num_episodes 1 \
+    --aggregation_method mean \
+    --num_episodes None \
     --seed 7
 
 Arguments:
-    --dataset_dir: Local path to libero_spatial dataset directory (HuggingFace parquet format)
-    --output_dir: Directory to save hidden states .npy files
+    --dataset_dir: Local path to libero_spatial dataset directory (lerobot format with videos)
+    --rlds_dataset_dir: Local path to libero_spatial_noops dataset directory (RLDS format for global_id mapping)
+    --output_dir: Directory to save hidden states HDF5 file
     --vqgan_checkpoint: Path to VQGAN checkpoint
     --load_checkpoint: Path to LAPA model checkpoint
     --load_llama_config: LAPA config (default: 7b)
+    --aggregation_method: How to aggregate sequence: "last" or "mean" (default: mean)
     --num_episodes: Maximum number of episodes to process (None = all)
     --seed: Random seed
 
 Outputs:
-    {output_dir}/lapa_hidden_states.npy containing:
-    - hidden_states: array of shape [num_samples] with variable [seq_len, 4096] arrays
-    - episode_indices: array of episode indices
-    - frame_indices: array of frame indices (0, 12, 24, ...)
-    - task_descriptions: array of task description strings
+    {output_dir}/lapa_hidden_states.h5 containing:
+    - hidden_states: [total_samples, 4096] aggregated hidden states
+    - episode_indices: [total_samples] episode IDs
+    - frame_indices: [total_samples] frame indices (0, 1, 2, ...)
+    - global_indices: [total_samples] global sequential indices into full dataset
+    - task_descriptions: [total_samples] task description strings
 """
 
 import sys
@@ -82,11 +89,12 @@ class FLAGSClass:
 
 @dataclass
 class ExtractLAPAConfig:
-    """Configuration for extracting LAPA hidden states."""
+    """Configuration for extracting aggregated LAPA hidden states."""
     # fmt: off
 
-    # Dataset parameters (HuggingFace parquet format)
-    dataset_dir: Union[str, Path] = "/path/to/libero_spatial"
+    # Dataset parameters
+    dataset_dir: Union[str, Path] = "/path/to/libero_spatial"  # Lerobot format (with videos)
+    rlds_dataset_dir: Union[str, Path] = "/path/to/libero_spatial_noops"  # RLDS format (for global_id mapping)
 
     # LAPA model parameters (same as inference.py)
     vqgan_checkpoint: str = "lapa_checkpoints/vqgan"
@@ -104,12 +112,54 @@ class ExtractLAPAConfig:
     tokens_per_delta: int = 4  # Matches inference.py
     multi_image: int = 1
     num_episodes: Optional[int] = None  # If set, only process first N episodes
-    frame_stride: int = 12  # Process every 12 frames (0.6s at 20fps = ~0.05s per frame in Libero)
+    aggregation_method: str = "mean"  # How to aggregate: "last" (last token) or "mean" (mean of all)
 
     # Output parameters
     output_dir: Union[str, Path] = "lapa_hidden_states"
 
     # fmt: on
+
+
+# ============================================================
+# UTILITY FUNCTIONS
+# ============================================================
+
+def aggregate_sequence(seq: np.ndarray, method: str = "mean") -> np.ndarray:
+    """Aggregate [seq_len, 4096] → [4096]"""
+    if method == "last":
+        return seq[-1, :].astype(np.float32)  # Last token
+    elif method == "mean":
+        return seq.mean(axis=0).astype(np.float32)  # Mean of all tokens
+    else:
+        raise ValueError(f"Unknown aggregation: {method}")
+
+
+def build_global_index_map(libero_dataset_dir: Path):
+    """
+    Build mapping from (episode_idx, frame_idx) to global sequential index.
+
+    The dataset has a global 'index' column that's sequential 0..52969.
+    This allows us to look up the global sample index for any (episode, frame) pair.
+    """
+    print(f"Building global index map from: {libero_dataset_dir}")
+
+    data_dir = libero_dataset_dir / "data"
+    parquet_files = sorted(data_dir.glob("**/*.parquet"))
+
+    if not parquet_files:
+        raise FileNotFoundError(f"No parquet files found in {data_dir}")
+
+    index_map = {}
+
+    for pf in tqdm.tqdm(parquet_files, desc="Building global index map"):
+        df = pd.read_parquet(pf, columns=["index", "episode_index", "frame_index"])
+        for _, row in df.iterrows():
+            key = (int(row["episode_index"]), int(row["frame_index"]))
+            global_idx = int(row["index"])
+            index_map[key] = global_idx
+
+    print(f"✓ Built global index map with {len(index_map)} entries")
+    return index_map
 
 
 # ============================================================
@@ -295,25 +345,33 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     """
 
     print("\n" + "="*70)
-    print("LAPA Hidden State Extraction from Libero Spatial Dataset")
+    print("LAPA Aggregated Hidden State Extraction")
     print("="*70 + "\n")
 
-    # Validate dataset directory
+    # Validate dataset directories
     dataset_dir = Path(cfg.dataset_dir)
     if not dataset_dir.exists():
         raise FileNotFoundError(f"Dataset directory not found: {dataset_dir}")
 
+    rlds_dataset_dir = Path(cfg.rlds_dataset_dir)
+    if not rlds_dataset_dir.exists():
+        raise FileNotFoundError(f"RLDS dataset directory not found: {rlds_dataset_dir}")
+
     # Create output directory
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Dataset directory: {dataset_dir}")
+    print(f"Dataset directory (lerobot): {dataset_dir}")
+    print(f"RLDS dataset directory: {rlds_dataset_dir}")
     print(f"Output directory: {output_dir}")
-    print(f"Frame stride: {cfg.frame_stride} (matches LAPA's ~0.6s training interval)")
-    print(f"Expected format: HuggingFace parquet with task_index mapping\n")
+    print(f"Aggregation method: {cfg.aggregation_method}")
+    print(f"Processing ALL frames (no frame skipping)\n")
 
     # Load LAPA extractor
     print("Initializing LAPA...")
     extractor = LAPAHiddenStateExtractor(cfg)
+
+    # Build global index map from RLDS dataset
+    global_index_map = build_global_index_map(rlds_dataset_dir)
 
     # Find parquet files without loading entire dataset
     print(f"\nDiscovering dataset structure from: {dataset_dir}")
@@ -335,36 +393,39 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     total_records = 0
 
     for parquet_file in parquet_files:
-        # Read only episode_index and task_index columns to build index
-        df = pd.read_parquet(parquet_file, columns=['episode_index', 'task_index'])
+        # Read episode_index, task_index, and frame_index columns to build index
+        df = pd.read_parquet(parquet_file, columns=['episode_index', 'task_index', 'frame_index'])
         for idx, row in df.iterrows():
             episode_idx = int(row['episode_index'])
             task_idx = int(row['task_index'])
+            frame_idx = int(row['frame_index'])
             if episode_idx not in episodes_metadata:
                 episodes_metadata[episode_idx] = {
                     'parquet_file': parquet_file,
                     'indices': [],
                     'task_index': task_idx,
-                    'num_frames': 0
+                    'num_frames': 0,
+                    'max_frame_idx': -1
                 }
             episodes_metadata[episode_idx]['indices'].append(idx)
             episodes_metadata[episode_idx]['num_frames'] += 1
+            episodes_metadata[episode_idx]['max_frame_idx'] = max(episodes_metadata[episode_idx]['max_frame_idx'], frame_idx)
             total_records += 1
         del df  # Explicitly delete to free memory
 
     print(f"✓ Found {len(episodes_metadata)} episodes with {total_records} total records")
 
-    # Process episodes with incremental saving every 10 episodes
+    # Process episodes with incremental saving
     hidden_states_list = []
     episode_indices_list = []
     frame_indices_list = []
+    global_indices_list = []
     task_descriptions_list = []
-    seq_lengths_list = []
     extracted_count = 0
     batch_count = 0
     save_interval = 50  # Save every N episodes
 
-    print(f"\nExtracting hidden states (sampling every {cfg.frame_stride} frames)...")
+    print(f"\nExtracting aggregated hidden states for ALL frames...")
     print(f"(Auto-saving every {save_interval} episodes to manage RAM)")
 
     episode_list = sorted(episodes_metadata.items())
@@ -379,12 +440,12 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
         # Get task description from metadata (no record loading needed)
         task_index = episode_meta['task_index']
         num_frames = episode_meta['num_frames']
+        max_frame_idx = episode_meta['max_frame_idx']
 
         if task_index < len(LIBERO_SPATIAL_TASKS):
             task_description = LIBERO_SPATIAL_TASKS[task_index]
         else:
-            print(f"\n  ⚠️  Task index {task_index} out of range, using generic prompt")
-            task_description = None
+            task_description = 'unknown'
 
         # Find video file for this episode
         video_path = None
@@ -401,9 +462,8 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
         if not video_path:
             raise RuntimeError(f"❌ FATAL: Video not found for episode {episode_idx}")
 
-        # Process frames at stride: 0, 12, 24, ...
-        frame_idx = 0
-        while frame_idx < num_frames:
+        # Process ALL frames: 0, 1, 2, ...
+        for frame_idx in range(max_frame_idx + 1):
             # Extract frame from video at frame_idx using ffmpeg (supports AV1)
             import subprocess
 
@@ -431,23 +491,32 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
             frame = Image.open(BytesIO(result.stdout)).convert('RGB')
 
             # Extract hidden states [seq_len, 4096]
-            hidden_state = extractor.extract_hidden_state_from_image(frame, task_description)
+            hidden_state_seq = extractor.extract_hidden_state_from_image(frame, task_description)
 
             # Verify shape
-            if hidden_state.ndim != 2 or hidden_state.shape[1] != 4096:
+            if hidden_state_seq.ndim != 2 or hidden_state_seq.shape[1] != 4096:
                 raise RuntimeError(
                     f"❌ FATAL: Unexpected hidden state shape for episode {episode_idx} frame {frame_idx}. "
-                    f"Got {hidden_state.shape}, expected [seq_len, 4096]"
+                    f"Got {hidden_state_seq.shape}, expected [seq_len, 4096]"
                 )
 
-            hidden_states_list.append(hidden_state)
-            seq_lengths_list.append(hidden_state.shape[0])
+            # Aggregate sequence [seq_len, 4096] → [4096]
+            aggregated_state = aggregate_sequence(hidden_state_seq, cfg.aggregation_method)
+
+            # Look up global index for this (episode, frame) pair
+            key = (episode_idx, frame_idx)
+            if key in global_index_map:
+                global_idx = global_index_map[key]
+            else:
+                # If not found, use -1 as sentinel
+                global_idx = -1
+
+            hidden_states_list.append(aggregated_state)
             episode_indices_list.append(episode_idx)
             frame_indices_list.append(frame_idx)
-            task_descriptions_list.append(task_description or 'unknown')
+            global_indices_list.append(global_idx)
+            task_descriptions_list.append(task_description)
             extracted_count += 1
-
-            frame_idx += cfg.frame_stride
 
         # Incremental save every N episodes to manage RAM
         if episode_count % save_interval == 0 and hidden_states_list:
@@ -460,33 +529,34 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
                 print("❌ h5py not installed. Install with: pip install h5py")
                 return
 
-            # Append to HDF5 file (store 2D hidden states without copying)
+            # Append to HDF5 file (store aggregated 1D hidden states [4096])
             with h5py.File(output_file, 'a') as f:
                 # Create datasets if they don't exist
                 if 'hidden_states' not in f:
-                    # Variable-length ragged array for 2D hidden states [seq_len, 4096]
-                    vlen_float = h5py.vlen_dtype(np.float32)
-                    f.create_dataset('hidden_states', (0,), maxshape=(None,), dtype=vlen_float, chunks=True)
-                    f.create_dataset('episode_indices', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
-                    f.create_dataset('frame_indices', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
-                    f.create_dataset('seq_lengths', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
-                    f.create_dataset('task_descriptions', (0,), maxshape=(None,), dtype=h5py.string_dtype(encoding='utf-8'), chunks=True)
+                    f.create_dataset('hidden_states', (0, 4096), maxshape=(None, 4096),
+                                   dtype=np.float32, chunks=(1000, 4096), compression='gzip')
+                    f.create_dataset('episode_indices', (0,), maxshape=(None,),
+                                   dtype=np.int32, chunks=10000, compression='gzip')
+                    f.create_dataset('frame_indices', (0,), maxshape=(None,),
+                                   dtype=np.int32, chunks=10000, compression='gzip')
+                    f.create_dataset('global_indices', (0,), maxshape=(None,),
+                                   dtype=np.int32, chunks=10000, compression='gzip')
+                    f.create_dataset('task_descriptions', (0,), maxshape=(None,),
+                                   dtype=h5py.string_dtype(encoding='utf-8'), chunks=10000, compression='gzip')
 
                 # Append new data
                 current_size = len(f['hidden_states'])
                 f['hidden_states'].resize(current_size + len(hidden_states_list), axis=0)
                 f['episode_indices'].resize(current_size + len(hidden_states_list), axis=0)
                 f['frame_indices'].resize(current_size + len(hidden_states_list), axis=0)
-                f['seq_lengths'].resize(current_size + len(hidden_states_list), axis=0)
+                f['global_indices'].resize(current_size + len(hidden_states_list), axis=0)
                 f['task_descriptions'].resize(current_size + len(hidden_states_list), axis=0)
 
-                for i, hidden_state in enumerate(hidden_states_list):
-                    # Flatten 2D array [seq_len, 4096] and store in variable-length dataset
-                    f['hidden_states'][current_size + i] = hidden_state.astype(np.float32).flatten()
-                    f['episode_indices'][current_size + i] = episode_indices_list[i]
-                    f['frame_indices'][current_size + i] = frame_indices_list[i]
-                    f['seq_lengths'][current_size + i] = seq_lengths_list[i]
-                    f['task_descriptions'][current_size + i] = task_descriptions_list[i]
+                f['hidden_states'][current_size:current_size+len(hidden_states_list)] = np.array(hidden_states_list, dtype=np.float32)
+                f['episode_indices'][current_size:current_size+len(hidden_states_list)] = np.array(episode_indices_list, dtype=np.int32)
+                f['frame_indices'][current_size:current_size+len(hidden_states_list)] = np.array(frame_indices_list, dtype=np.int32)
+                f['global_indices'][current_size:current_size+len(hidden_states_list)] = np.array(global_indices_list, dtype=np.int32)
+                f['task_descriptions'][current_size:current_size+len(hidden_states_list)] = np.array(task_descriptions_list, dtype=object)
 
             print(f"\n✅ Batch {batch_count} saved: {current_size + len(hidden_states_list)} total samples to {output_file.name}")
 
@@ -494,8 +564,8 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
             hidden_states_list = []
             episode_indices_list = []
             frame_indices_list = []
+            global_indices_list = []
             task_descriptions_list = []
-            seq_lengths_list = []
 
     pbar.close()
 
@@ -512,28 +582,30 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
         with h5py.File(output_file, 'a') as f:
             # Create datasets if they don't exist
             if 'hidden_states' not in f:
-                vlen_float = h5py.vlen_dtype(np.float32)
-                f.create_dataset('hidden_states', (0,), maxshape=(None,), dtype=vlen_float, chunks=True)
-                f.create_dataset('episode_indices', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
-                f.create_dataset('frame_indices', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
-                f.create_dataset('seq_lengths', (0,), maxshape=(None,), dtype=np.int32, chunks=True)
-                f.create_dataset('task_descriptions', (0,), maxshape=(None,), dtype=h5py.string_dtype(encoding='utf-8'), chunks=True)
+                f.create_dataset('hidden_states', (0, 4096), maxshape=(None, 4096),
+                               dtype=np.float32, chunks=(1000, 4096), compression='gzip')
+                f.create_dataset('episode_indices', (0,), maxshape=(None,),
+                               dtype=np.int32, chunks=10000, compression='gzip')
+                f.create_dataset('frame_indices', (0,), maxshape=(None,),
+                               dtype=np.int32, chunks=10000, compression='gzip')
+                f.create_dataset('global_indices', (0,), maxshape=(None,),
+                               dtype=np.int32, chunks=10000, compression='gzip')
+                f.create_dataset('task_descriptions', (0,), maxshape=(None,),
+                               dtype=h5py.string_dtype(encoding='utf-8'), chunks=10000, compression='gzip')
 
             # Append new data
             current_size = len(f['hidden_states'])
             f['hidden_states'].resize(current_size + len(hidden_states_list), axis=0)
             f['episode_indices'].resize(current_size + len(hidden_states_list), axis=0)
             f['frame_indices'].resize(current_size + len(hidden_states_list), axis=0)
-            f['seq_lengths'].resize(current_size + len(hidden_states_list), axis=0)
+            f['global_indices'].resize(current_size + len(hidden_states_list), axis=0)
             f['task_descriptions'].resize(current_size + len(hidden_states_list), axis=0)
 
-            for i, hidden_state in enumerate(hidden_states_list):
-                # Flatten 2D array [seq_len, 4096] and store in variable-length dataset
-                f['hidden_states'][current_size + i] = hidden_state.astype(np.float32).flatten()
-                f['episode_indices'][current_size + i] = episode_indices_list[i]
-                f['frame_indices'][current_size + i] = frame_indices_list[i]
-                f['seq_lengths'][current_size + i] = seq_lengths_list[i]
-                f['task_descriptions'][current_size + i] = task_descriptions_list[i]
+            f['hidden_states'][current_size:current_size+len(hidden_states_list)] = np.array(hidden_states_list, dtype=np.float32)
+            f['episode_indices'][current_size:current_size+len(hidden_states_list)] = np.array(episode_indices_list, dtype=np.int32)
+            f['frame_indices'][current_size:current_size+len(hidden_states_list)] = np.array(frame_indices_list, dtype=np.int32)
+            f['global_indices'][current_size:current_size+len(hidden_states_list)] = np.array(global_indices_list, dtype=np.int32)
+            f['task_descriptions'][current_size:current_size+len(hidden_states_list)] = np.array(task_descriptions_list, dtype=object)
 
             final_size = len(f['hidden_states'])
 
@@ -542,10 +614,15 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     print(f"\n{'='*70}")
     print(f"✅ Extraction Complete")
     print(f"{'='*70}")
-    print(f"Successfully extracted: {extracted_count} hidden states")
+    print(f"Successfully extracted: {extracted_count} aggregated hidden states")
+    print(f"Aggregation method: {cfg.aggregation_method}")
     print(f"\nSaved to: {output_dir}/lapa_hidden_states.h5 (HDF5 format)")
-    print(f"  - Contains: hidden_states [seq_len, 4096], episode_indices, frame_indices, seq_lengths, task_descriptions")
-    print(f"  - Direct access: import h5py; f=h5py.File(...); hs=f['hidden_states'][i]; f.close()")
+    print(f"  - hidden_states: [{extracted_count}, 4096] aggregated states")
+    print(f"  - episode_indices: [{extracted_count}] episode IDs")
+    print(f"  - frame_indices: [{extracted_count}] frame indices (0, 1, 2, ...)")
+    print(f"  - global_indices: [{extracted_count}] global dataset indices (0..52969)")
+    print(f"  - task_descriptions: [{extracted_count}] task descriptions")
+    print(f"\nDirect access: import h5py; f=h5py.File(...); hs=f['hidden_states'][i]; f.close()")
 
 
 if __name__ == "__main__":
