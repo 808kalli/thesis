@@ -484,7 +484,7 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
         # Incremental save every N episodes to manage RAM
         if episode_count % save_interval == 0 and hidden_states_list:
             batch_count += 1
-            output_file = output_dir / "lapa_hidden_states.h5"
+            output_file = output_dir / "lapa_hidden_states_full.h5"
 
             try:
                 import h5py
