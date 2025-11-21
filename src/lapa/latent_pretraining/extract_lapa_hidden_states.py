@@ -46,6 +46,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
+import subprocess
+import tempfile
+import shutil
+from io import BytesIO
 
 import draccus
 import numpy as np
@@ -132,6 +136,58 @@ def aggregate_sequence(seq: np.ndarray, method: str = "mean") -> np.ndarray:
         raise ValueError(f"Unknown aggregation: {method}")
 
 
+def extract_all_frames_from_video(video_path: Path, max_frame_idx: int) -> dict:
+    """
+    Extract ALL frames from video in a single ffmpeg call for efficiency.
+
+    Instead of calling ffmpeg for each frame (O(n²) decoding cost),
+    we dump all frames to disk in one pass (O(n) cost).
+
+    Args:
+        video_path: Path to video file
+        max_frame_idx: Expected number of frames (0-indexed, so total = max_frame_idx + 1)
+
+    Returns:
+        dict mapping frame_idx -> PIL Image
+    """
+    # Create temporary directory for frame extraction
+    temp_dir = tempfile.mkdtemp(prefix="lapa_frames_")
+
+    try:
+        # Extract all frames with ffmpeg in a single pass
+        # fps=1 means 1 frame per second (adjust if needed for your video)
+        frame_pattern = temp_dir + "/frame_%04d.png"
+        cmd = [
+            'ffmpeg',
+            '-i', str(video_path),
+            '-f', 'image2',
+            '-pix_fmt', 'rgb24',
+            frame_pattern
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, timeout=30)
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg failed to extract frames from {video_path}. "
+                f"stderr: {result.stderr.decode()[:500]}"
+            )
+
+        # Load frames from disk into memory
+        frames = {}
+        frame_files = sorted(Path(temp_dir).glob("frame_*.png"))
+
+        for i, frame_file in enumerate(frame_files):
+            try:
+                frames[i] = Image.open(frame_file).convert('RGB')
+            except Exception as e:
+                print(f"Warning: Could not load frame {i}: {e}")
+
+        return frames
+
+    finally:
+        # Clean up temporary directory
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 # ============================================================
@@ -425,33 +481,17 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
         if not video_path:
             raise RuntimeError(f"❌ FATAL: Video not found for episode {episode_idx}")
 
-        # Process ALL frames: 0, 1, 2, ...
+        # Extract ALL frames from video in a single efficient pass (not per-frame)
+        frames = extract_all_frames_from_video(video_path, max_frame_idx)
+
+        # Process frames in order: 0, 1, 2, ...
         for frame_idx in range(max_frame_idx + 1):
-            # Extract frame from video at frame_idx using ffmpeg (supports AV1)
-            import subprocess
+            if frame_idx not in frames:
+                # Frame not extracted (shouldn't happen normally)
+                print(f"Warning: Frame {frame_idx} missing from episode {episode_idx}")
+                continue
 
-            # Use ffmpeg to extract frame at index
-            cmd = [
-                'ffmpeg',
-                '-i', str(video_path),
-                '-vf', f'select=eq(n\\,{frame_idx})',
-                '-vframes', '1',
-                '-f', 'image2pipe',
-                '-pix_fmt', 'rgb24',
-                '-'
-            ]
-
-            result = subprocess.run(cmd, capture_output=True, timeout=5)
-
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"❌ FATAL: ffmpeg failed for episode {episode_idx} frame {frame_idx}. "
-                    f"stderr: {result.stderr.decode()[:200]}"
-                )
-
-            # Convert bytes to PIL Image
-            from io import BytesIO
-            frame = Image.open(BytesIO(result.stdout)).convert('RGB')
+            frame = frames[frame_idx]
 
             # Extract hidden states [seq_len, 4096]
             hidden_state_seq = extractor.extract_hidden_state_from_image(frame, task_description)
