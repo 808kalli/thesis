@@ -205,7 +205,9 @@ def load_checkpoint(checkpoint_dir, optimizer, device_id, distributed_state):
 
 @draccus.wrap()
 def finetune(cfg: FinetuneConfig) -> None:
-    print(f"Fine-tuning OpenVLA Model `{cfg.vla_path}` on `{cfg.dataset_name}`")
+    print("\n" + "="*70)
+    print("\033[91m" + " "*15 + "Do or do not; there is no try." + "\033[0m")
+    print("="*70 + "\n")
 
     # [Validate] Ensure GPU Available & Set Device / Distributed Context
     assert torch.cuda.is_available(), "Fine-tuning assumes at least one GPU is available!"
