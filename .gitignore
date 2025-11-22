@@ -9,6 +9,7 @@ lapa_latents/
 openvla_outputs/
 /SimplerEnv-OpenVLA/
 /hidden_states_logs/
+/checkpoints/
 
 # === Python + Runtime Artifacts ===
 __pycache__/
