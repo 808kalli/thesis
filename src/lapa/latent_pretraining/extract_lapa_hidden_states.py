@@ -130,7 +130,7 @@ class ExtractLAPAConfig:
     episode_start: Optional[int] = None  # First episode to process (0-indexed, None = start from 0)
     episode_end: Optional[int] = None  # Last episode to process (0-indexed inclusive, None = process all)
     aggregation_method: str = "mean"  # How to aggregate: "last" (last token) or "mean" (mean of all)
-    frame_stride: int = 2  # Process every Nth frame (stride=1 for all, stride=2 for every 2nd, etc.)
+    frame_stride: int = 1  # Process every Nth frame (stride=1 for all, stride=2 for every 2nd, etc.)
 
     # Output parameters
     output_dir: Union[str, Path] = "lapa_hidden_states"
@@ -483,10 +483,11 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
         print(f"❌ No episodes to process with given range. Exiting.")
         return
 
-    # Show which episodes will be processed
+    # Show which episodes will be processed and track for metadata
     first_episode = episode_list[0][0]
     last_episode = episode_list[-1][0]
-    print(f"Processing episodes {first_episode} to {last_episode} ({len(episode_list)} total)")
+    num_episodes_processed = len(episode_list)
+    print(f"Processing episodes {first_episode} to {last_episode} ({num_episodes_processed} total)")
 
     pbar = tqdm.tqdm(total=len(episode_list), desc="Episodes")
 
@@ -560,7 +561,7 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
         # Incremental save every N episodes to manage RAM
         if episode_count % save_interval == 0 and hidden_states_list:
             batch_count += 1
-            output_file = output_dir / f"lapa_hidden_states_stride_{cfg.frame_stride}.h5"
+            output_file = output_dir / f"lapa_hidden_states_eps{first_episode}-{last_episode}_stride{cfg.frame_stride}.h5"
 
             try:
                 import h5py
@@ -610,7 +611,7 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
 
     # Save any remaining data
     if hidden_states_list:
-        output_file = output_dir / "lapa_hidden_states.h5"
+        output_file = output_dir / f"lapa_hidden_states_eps{first_episode}-{last_episode}_stride{cfg.frame_stride}.h5"
 
         try:
             import h5py
@@ -654,12 +655,14 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     print(f"✅ Extraction Complete")
     print(f"{'='*70}")
     print(f"Successfully extracted: {extracted_count} aggregated hidden states")
+    print(f"Episodes processed: {first_episode} to {last_episode} ({num_episodes_processed} total)")
+    print(f"Frame stride: {cfg.frame_stride}")
     print(f"Aggregation method: {cfg.aggregation_method}")
-    print(f"\nSaved to: {output_dir}/lapa_hidden_states.h5 (HDF5 format)")
+    print(f"\nSaved to: {output_dir}/lapa_hidden_states_eps{first_episode}-{last_episode}_stride{cfg.frame_stride}.h5 (HDF5 format)")
     print(f"  - hidden_states: [{extracted_count}, 4096] aggregated states")
     print(f"  - episode_indices: [{extracted_count}] episode IDs")
-    print(f"  - frame_indices: [{extracted_count}] frame indices (0, 1, 2, ...)")
-    print(f"  - global_indices: [{extracted_count}] global dataset indices (0..52969)")
+    print(f"  - frame_indices: [{extracted_count}] frame indices (sampled at stride intervals)")
+    print(f"  - global_indices: [{extracted_count}] global dataset indices")
     print(f"  - task_descriptions: [{extracted_count}] task descriptions")
     print(f"\nDirect access: import h5py; f=h5py.File(...); hs=f['hidden_states'][i]; f.close()")
 
