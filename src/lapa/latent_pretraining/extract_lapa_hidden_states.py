@@ -29,8 +29,21 @@ Arguments:
     --load_checkpoint: Path to LAPA model checkpoint
     --load_llama_config: LAPA config (default: 7b)
     --aggregation_method: How to aggregate sequence: "last" or "mean" (default: mean)
-    --num_episodes: Maximum number of episodes to process (None = all)
+    --frame_stride: Process every Nth frame (default: 2, use 1 for all frames)
+    --num_episodes: Maximum number of episodes to process (None = all). Takes precedence over episode_end.
+    --episode_start: First episode to process (0-indexed, default: None = start from 0)
+    --episode_end: Last episode to process inclusive (0-indexed, default: None = process all)
     --seed: Random seed
+
+Examples:
+    # Process episodes 10-50
+    python extract_lapa_hidden_states.py --dataset_dir /path --episode_start 10 --episode_end 50
+
+    # Process first 100 episodes
+    python extract_lapa_hidden_states.py --dataset_dir /path --episode_end 99
+
+    # Process episodes 0, 2, 4, ... (stride=2) for entire dataset
+    python extract_lapa_hidden_states.py --dataset_dir /path --frame_stride 2
 
 Outputs:
     {output_dir}/lapa_hidden_states.h5 containing:
@@ -114,6 +127,8 @@ class ExtractLAPAConfig:
     tokens_per_delta: int = 4  # Matches inference.py
     multi_image: int = 1
     num_episodes: Optional[int] = None  # If set, only process first N episodes
+    episode_start: Optional[int] = None  # First episode to process (0-indexed, None = start from 0)
+    episode_end: Optional[int] = None  # Last episode to process (0-indexed inclusive, None = process all)
     aggregation_method: str = "mean"  # How to aggregate: "last" (last token) or "mean" (mean of all)
     frame_stride: int = 2  # Process every Nth frame (stride=1 for all, stride=2 for every 2nd, etc.)
 
@@ -450,8 +465,28 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
     print(f"(Auto-saving every {save_interval} episodes to manage RAM)")
 
     episode_list = sorted(episodes_metadata.items())
+
+    # Apply episode range filtering
     if cfg.num_episodes is not None:
+        # num_episodes takes precedence: process first N episodes
         episode_list = episode_list[:cfg.num_episodes]
+    else:
+        # Use episode_start and episode_end for range selection
+        start_idx = cfg.episode_start if cfg.episode_start is not None else 0
+        end_idx = cfg.episode_end if cfg.episode_end is not None else len(episode_list) - 1
+        # Clamp to valid range
+        start_idx = max(0, min(start_idx, len(episode_list) - 1))
+        end_idx = max(0, min(end_idx, len(episode_list) - 1))
+        episode_list = episode_list[start_idx:end_idx + 1]  # +1 because end_idx is inclusive
+
+    if not episode_list:
+        print(f"❌ No episodes to process with given range. Exiting.")
+        return
+
+    # Show which episodes will be processed
+    first_episode = episode_list[0][0]
+    last_episode = episode_list[-1][0]
+    print(f"Processing episodes {first_episode} to {last_episode} ({len(episode_list)} total)")
 
     pbar = tqdm.tqdm(total=len(episode_list), desc="Episodes")
 
