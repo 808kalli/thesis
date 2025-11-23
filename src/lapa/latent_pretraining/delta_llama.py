@@ -467,9 +467,6 @@ class FlaxDeltaLaMAForCausalLMModule(nn.Module):
         else:
             delta_logits = self.delta_head(hidden_states)
 
-        # Only print during generation (when sequence length is 1), not prefill
-        jax.debug.print("Hidden states shape: {}, Delta logits shape: {}", hidden_states.shape, delta_logits.shape)
-
         if self.config.sample_mode == 'all':
             if not return_dict:
                 return (vision_logits, lm_logits, delta_logits) + outputs[1:]
