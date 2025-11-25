@@ -440,6 +440,9 @@ def finetune(cfg: FinetuneConfig) -> None:
 
             teacher_hidden_aggregated = torch.stack(teacher_hidden_aggregated_list).to(device_id)
 
+            if batch_idx == 0:
+                raise RuntimeError(f"FIRST BATCH DEBUG:\nStudent batch global_indices: {global_indices}\nTeacher H5 indexed at: {[int(idx) for idx in global_indices]}\nFetched teacher_hidden_aggregated shape: {teacher_hidden_aggregated.shape}\nVerify: teacher_dataset_file['hidden_states'][{int(global_indices[0])}] -> shape {teacher_dataset_file['hidden_states'][int(global_indices[0])].shape}")
+
             # Aggregate student sequences to single representations
             student_hidden_aggregated = sequence_aggregation_student(student_hidden_states_full)
 
