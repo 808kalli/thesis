@@ -2,13 +2,14 @@
 Visualize student and teacher similarity matrices from saved hidden states.
 
 Usage:
-    python visualize_similarity_matrices.py --normalize [True/False] --common_scale [True/False]
+    python visualize_similarity_matrices.py --normalize [True/False] --common_scale [True/False] --apply_softmax [True/False]
 
 Arguments:
     --normalize: L2 normalize hidden states before computing similarity (default: True)
-    --temperature: Temperature for scaling similarity matrices (default: 1.0)
+    --temperature: Temperature for scaling similarity matrices (default: 1.0, only used if apply_softmax=True)
     --mask_diagonal: Mask diagonal with -inf (default: False)
     --common_scale: Use common color scale for both plots (default: False)
+    --apply_softmax: Apply softmax to similarity matrices (default: True)
 
 Controls:
     Right Arrow / Space: Next batch
@@ -65,28 +66,32 @@ def compute_similarity_matrix(hidden_states, normalize=True):
     return sim_matrix
 
 
-def apply_temperature_and_masking(sim_matrix, temperature=1.0, mask_diagonal=False):
+def apply_temperature_and_masking(sim_matrix, temperature=1.0, mask_diagonal=False, apply_softmax=True):
     """
-    Apply temperature scaling, optional diagonal masking, and softmax to similarity matrix.
+    Apply temperature scaling, optional diagonal masking, and optional softmax to similarity matrix.
 
     Args:
         sim_matrix: [batch_size, batch_size] similarity matrix
-        temperature: Temperature for scaling (temperature > 1 makes softmax softer)
+        temperature: Temperature for scaling (temperature > 1 makes softmax softer, only used if apply_softmax=True)
         mask_diagonal: If True, set diagonal to -inf (softmax will give 0)
+        apply_softmax: If True, apply softmax to get probability distribution
 
     Returns:
-        processed_matrix: similarity matrix with temperature, masking, and softmax applied
+        processed_matrix: similarity matrix with temperature, masking, and optional softmax applied
     """
-    # Apply temperature scaling
-    processed = sim_matrix / temperature if temperature != 1.0 else sim_matrix.copy()
+    processed = sim_matrix.copy()
 
-    # Mask diagonal if requested
+    # Mask diagonal if requested (before temperature scaling and softmax)
     if mask_diagonal:
         # Set diagonal to -inf so softmax gives 0
         np.fill_diagonal(processed, -np.inf)
 
-    # Apply softmax across each row to get probability distribution
-    processed = softmax(processed, axis=1)
+    if apply_softmax:
+        # Apply temperature scaling
+        processed = processed / temperature if temperature != 1.0 else processed
+
+        # Apply softmax across each row to get probability distribution
+        processed = softmax(processed, axis=1)
 
     return processed
 
@@ -94,12 +99,13 @@ def apply_temperature_and_masking(sim_matrix, temperature=1.0, mask_diagonal=Fal
 class InteractiveBrowser:
     """Interactive browser for similarity matrices."""
 
-    def __init__(self, hidden_states_dir, normalize=True, temperature=1.0, mask_diagonal=False, common_scale=False):
+    def __init__(self, hidden_states_dir, normalize=True, temperature=1.0, mask_diagonal=False, common_scale=False, apply_softmax=True):
         self.hidden_states_dir = Path(hidden_states_dir)
         self.normalize = normalize
         self.temperature = temperature
         self.mask_diagonal = mask_diagonal
         self.common_scale = common_scale
+        self.apply_softmax = apply_softmax
         self.current_batch = 0
         self.max_batch = self._find_max_batch()
 
@@ -159,9 +165,9 @@ class InteractiveBrowser:
         student_sim = compute_similarity_matrix(batch_data["student_hidden"], normalize=self.normalize)
         teacher_sim = compute_similarity_matrix(batch_data["teacher_hidden"], normalize=self.normalize)
 
-        # Apply temperature scaling and optional diagonal masking
-        student_sim = apply_temperature_and_masking(student_sim, temperature=self.temperature, mask_diagonal=self.mask_diagonal)
-        teacher_sim = apply_temperature_and_masking(teacher_sim, temperature=self.temperature, mask_diagonal=self.mask_diagonal)
+        # Apply temperature scaling, optional diagonal masking, and optional softmax
+        student_sim = apply_temperature_and_masking(student_sim, temperature=self.temperature, mask_diagonal=self.mask_diagonal, apply_softmax=self.apply_softmax)
+        teacher_sim = apply_temperature_and_masking(teacher_sim, temperature=self.temperature, mask_diagonal=self.mask_diagonal, apply_softmax=self.apply_softmax)
 
         # Determine color scale
         if self.common_scale:
@@ -196,6 +202,7 @@ class InteractiveBrowser:
         self.fig.suptitle(
             f"Aggregation: {batch_data['aggregation_method']} | "
             f"Normalize: {self.normalize} | "
+            f"Apply Softmax: {self.apply_softmax} | "
             f"Temperature: {self.temperature} | "
             f"Common Scale: {self.common_scale} | "
             f"Batch {batch_idx}/{self.max_batch} | "
@@ -240,6 +247,7 @@ class InteractiveBrowser:
         print(f"Loading batches from: {self.hidden_states_dir}")
         print(f"Found {self.max_batch + 1} batches (0-{self.max_batch})")
         print(f"Normalization: {self.normalize}")
+        print(f"Apply Softmax: {self.apply_softmax}")
         print(f"Temperature: {self.temperature}")
         print(f"Diagonal Masking: {self.mask_diagonal}")
         print(f"Common Scale: {self.common_scale}")
@@ -296,6 +304,12 @@ def main():
         default=False,
         help="Whether to use common color scale for both student and teacher matrices (default: False)"
     )
+    parser.add_argument(
+        "--apply_softmax",
+        type=lambda x: x.lower() == "true",
+        default=True,
+        help="Whether to apply softmax to similarity matrices (default: True)"
+    )
 
     args = parser.parse_args()
 
@@ -311,7 +325,8 @@ def main():
         normalize=args.normalize,
         temperature=args.temperature,
         mask_diagonal=args.mask_diagonal,
-        common_scale=args.common_scale
+        common_scale=args.common_scale,
+        apply_softmax=args.apply_softmax
     )
     browser.run()
 
