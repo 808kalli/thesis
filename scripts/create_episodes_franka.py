@@ -136,10 +136,10 @@ def load_parquet_data(dataset_path: str):
 
 def group_timesteps_into_episodes(dataset):
     """Group individual timesteps into episodes based on episode_index."""
-    
+
     print("Grouping timesteps into episodes...")
     episodes_data = defaultdict(list)
-    
+
     # Group by episode_index
     for timestep in tqdm(dataset, desc="Grouping timesteps"):
         episode_idx = timestep['episode_index']
@@ -147,15 +147,15 @@ def group_timesteps_into_episodes(dataset):
             'frame_index': timestep['frame_index'],
             'action': timestep['action'],
             'observation_state': timestep['observation.state'],
-            'gripper_state': timestep['observation.states.gripper_state'],
             'task_index': timestep['task_index'],
-            'timestamp': timestep.get('timestamp', 0)
+            'timestamp': timestep.get('timestamp', 0),
+            'global_index': timestep.get('index', -1),  # Global index from raw dataset
         })
-    
+
     # Sort timesteps within each episode by frame_index
     for episode_idx in episodes_data:
         episodes_data[episode_idx].sort(key=lambda x: x['frame_index'])
-    
+
     print(f"Found {len(episodes_data)} episodes")
     return episodes_data
 
@@ -184,48 +184,52 @@ def load_video_for_episode(dataset_path: str, episode_idx: int, video_type: str)
 
 def process_episode(episode_idx: int, timesteps: List[Dict], dataset_path: str, tasks: Dict) -> Dict[str, Any]:
     """Process a single episode and create the numpy dictionary."""
-    
+
     # Load videos
     wrist_video_bytes = load_video_for_episode(dataset_path, episode_idx, 'wrist')
     context_video_bytes = load_video_for_episode(dataset_path, episode_idx, 'context')
-    
+
     # Extract frames
     wrist_frames = extract_frames_from_video_bytes(wrist_video_bytes)
     context_frames = extract_frames_from_video_bytes(context_video_bytes)
-    
+
     # Resize frames to 256x256
     wrist_images = resize_frames(wrist_frames, (256, 256))
     context_images = resize_frames(context_frames, (256, 256))
-    
+
     # Extract trajectory data
     actions = []
     states = []
-    
+    global_indices = []
+
     # Get task instruction
     task_index = timesteps[0]['task_index']
     language_instruction = tasks.get(task_index, f"Task {task_index}")
-    
+
     for timestep in timesteps:
         actions.append(timestep['action'])
         states.append(timestep['observation_state'])
-    
+        global_indices.append(timestep['global_index'])
+
     # Convert to numpy arrays
     actions = np.array(actions, dtype=np.float32)
     states = np.array(states, dtype=np.float32)
-    
+    global_indices = np.array(global_indices, dtype=np.int32)
+
     # Ensure all arrays have the same length
     num_timesteps = len(timesteps)
     num_wrist_frames = len(wrist_images)
     num_context_frames = len(context_images)
-    
+
     if num_timesteps != num_wrist_frames or num_timesteps != num_context_frames:
         print(f"Warning: Episode {episode_idx} length mismatch - timesteps: {num_timesteps}, wrist: {num_wrist_frames}, context: {num_context_frames}")
         min_length = min(num_timesteps, num_wrist_frames, num_context_frames)
         actions = actions[:min_length]
         states = states[:min_length]
+        global_indices = global_indices[:min_length]
         wrist_images = wrist_images[:min_length]
         context_images = context_images[:min_length]
-    
+
     # Create episode dictionary following OpenVLA format
     episode_dict = {
         'action': actions,                           # Shape: (T, 7) - robot actions
@@ -239,9 +243,10 @@ def process_episode(episode_idx: int, timesteps: List[Dict], dataset_path: str, 
             'episode_index': episode_idx,
             'task_index': task_index,
             'num_steps': len(actions)
-        }
+        },
+        'global_indices': global_indices,            # Shape: (T,) - global indices from raw dataset
     }
-    
+
     return episode_dict
 
 
@@ -337,7 +342,8 @@ Each `episode_X.npy` file contains a dictionary with the following structure:
         'episode_index': int,                # Episode index
         'task_index': int,                   # Task type index
         'num_steps': int                     # Number of timesteps in episode
-    }}
+    }},
+    'global_indices': np.ndarray,            # Shape: (T,) - Global indices from raw dataset
 }}
 ```
 
@@ -364,9 +370,11 @@ images = episode['observation']['image']  # (T, 256, 256, 3)
 wrist_images = episode['observation']['wrist_image']  # (T, 256, 256, 3)
 states = episode['observation']['state']  # (T, 8)
 instruction = episode['language_instruction']  # string
+global_indices = episode['global_indices']  # (T,) - indices for looking up in other datasets
 
 print(f"Instruction: {{instruction}}")
 print(f"Number of steps: {{len(actions)}}")
+print(f"Global indices: {{global_indices}}")
 ```
 """
     

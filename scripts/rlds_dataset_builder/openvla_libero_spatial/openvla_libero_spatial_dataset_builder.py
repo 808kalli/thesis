@@ -103,7 +103,7 @@ class OpenvlaLiberoSpatial(tfds.core.GeneratorBasedBuilder):
     def _split_generators(self, dl_manager: tfds.download.DownloadManager):
         """Define data splits."""
         return {
-            'train': self._generate_examples(path='data/train_supervised/episode_*.npy'),
+            'train': self._generate_examples(path='data/train_full/episode_*.npy'),
             # 'val': self._generate_examples(path='data/val/episode_*.npy'),
         }
 

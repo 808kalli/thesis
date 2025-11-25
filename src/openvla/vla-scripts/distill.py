@@ -430,20 +430,15 @@ def finetune(cfg: FinetuneConfig) -> None:
 
             # Collect teacher states for this batch using global indices
             teacher_hidden_aggregated_list = []
-            valid_mask_list = []
 
             for global_idx in global_indices:
                 # Index into teacher H5 using the actual global index from the dataset
                 teacher_state = torch.from_numpy(
-                    np.array(teacher_dataset_file["teacher_states"][int(global_idx)], dtype=np.float32)
+                    np.array(teacher_dataset_file["hidden_states"][int(global_idx)], dtype=np.float32)
                 )
-                has_supervision = bool(teacher_dataset_file["has_supervision"][int(global_idx)])
-
                 teacher_hidden_aggregated_list.append(teacher_state)
-                valid_mask_list.append(has_supervision)
 
             teacher_hidden_aggregated = torch.stack(teacher_hidden_aggregated_list).to(device_id)
-            valid_mask = torch.tensor(valid_mask_list, dtype=torch.bool).to(device_id)
 
             # Aggregate student sequences to single representations
             student_hidden_aggregated = sequence_aggregation_student(student_hidden_states_full)
@@ -465,7 +460,6 @@ def finetune(cfg: FinetuneConfig) -> None:
                 distill_loss = distillation_loss_fn(
                     student_hidden_aggregated,
                     teacher_hidden_aggregated,
-                    valid_mask=valid_mask,
                 )
 
             # Combine losses

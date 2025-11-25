@@ -151,13 +151,11 @@ class SimilarityMatrixDistillationLoss(nn.Module):
         self,
         student_hidden_states: torch.Tensor,  # [batch, hidden_dim]
         teacher_hidden_states: torch.Tensor,  # [batch, hidden_dim]
-        valid_mask: Optional[torch.Tensor] = None,  # [batch] boolean mask
     ) -> torch.Tensor:
         """
         Args:
             student_hidden_states: [batch, hidden_dim]
             teacher_hidden_states: [batch, hidden_dim]
-            valid_mask: [batch] boolean mask indicating valid supervision samples
 
         Returns:
             loss: scalar KL divergence loss
@@ -209,17 +207,5 @@ class SimilarityMatrixDistillationLoss(nn.Module):
             teacher_prob,  # P (teacher)
             reduction="batchmean",
         )
-
-        # Apply valid mask if provided
-        if valid_mask is not None:
-            # Zero out loss for invalid samples
-            # Note: This is approximate since KL is computed on the full batch
-            # For more precise masking, we could compute KL per-sample
-            n_valid = valid_mask.sum().float()
-            if n_valid > 0:
-                # Reweight: upscale loss from valid samples to maintain expected magnitude
-                kl_loss = kl_loss * (batch_size / max(n_valid, 1))
-            else:
-                kl_loss = torch.tensor(0.0, device=student_hidden_states.device)
 
         return kl_loss
