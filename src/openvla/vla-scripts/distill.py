@@ -440,14 +440,6 @@ def finetune(cfg: FinetuneConfig) -> None:
 
             teacher_hidden_aggregated = torch.stack(teacher_hidden_aggregated_list).to(device_id)
 
-            if batch_idx == 0:
-                debug_lines = ["TEACHER hidden states from first batch:"]
-                for i in range(min(5, len(teacher_hidden_aggregated))):
-                    state = teacher_hidden_aggregated[i]
-                    debug_lines.append(f"  Sample {i}: shape={state.shape}")
-                debug_msg = "\n".join(debug_lines)
-                raise RuntimeError(debug_msg)
-
             # Aggregate student sequences to single representations
             student_hidden_aggregated = sequence_aggregation_student(student_hidden_states_full)
 
