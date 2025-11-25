@@ -118,22 +118,25 @@ class SimilarityMatrixDistillationLoss(nn.Module):
         mask_diagonal: bool = True,
         projection_dim: Optional[int] = None,
         use_layer_norm: bool = False,
+        apply_softmax: bool = True,
     ):
         """
         Args:
             student_hidden_dim: Dimension of student hidden states
             teacher_hidden_dim: Dimension of teacher hidden states
-            temperature: Temperature for softmax (higher = softer)
+            temperature: Temperature for softmax (higher = softer, only used if apply_softmax=True)
             normalize: Whether to L2 normalize before computing similarity
             mask_diagonal: Whether to mask diagonal with -inf (softmax will give 0)
             projection_dim: If specified, project to this dimension before similarity computation
             use_layer_norm: Whether to apply LayerNorm per sample (useful when normalize=False)
+            apply_softmax: Whether to apply softmax before KL divergence (default: True)
         """
         super().__init__()
         self.temperature = temperature
         self.normalize = normalize
         self.mask_diagonal = mask_diagonal
         self.use_layer_norm = use_layer_norm
+        self.apply_softmax = apply_softmax
 
         # Optional projection layer to match dimensions
         self.projection = None
@@ -193,19 +196,23 @@ class SimilarityMatrixDistillationLoss(nn.Module):
             student_sim = student_sim.masked_fill(mask, float('-inf'))
             teacher_sim = teacher_sim.masked_fill(mask, float('-inf'))
 
-        # Apply temperature scaling
-        student_sim = student_sim / self.temperature
-        teacher_sim = teacher_sim / self.temperature
+        # Apply temperature scaling (only affects loss if softmax is applied)
+        if self.apply_softmax:
+            student_sim = student_sim / self.temperature
+            teacher_sim = teacher_sim / self.temperature
 
-        # Convert to probability distributions
-        student_prob = F.softmax(student_sim, dim=1)  # [batch, batch]
-        teacher_prob = F.softmax(teacher_sim, dim=1)  # [batch, batch]
+            # Convert to probability distributions
+            student_prob = F.softmax(student_sim, dim=1)  # [batch, batch]
+            teacher_prob = F.softmax(teacher_sim, dim=1)  # [batch, batch]
 
-        # KL divergence: KL(P || Q) = sum(P * log(P/Q))
-        kl_loss = F.kl_div(
-            torch.log(student_prob + 1e-8),  # log Q (student)
-            teacher_prob,  # P (teacher)
-            reduction="batchmean",
-        )
+            # KL divergence: KL(P || Q) = sum(P * log(P/Q))
+            kl_loss = F.kl_div(
+                torch.log(student_prob + 1e-8),  # log Q (student)
+                teacher_prob,  # P (teacher)
+                reduction="batchmean",
+            )
+        else:
+            # Direct MSE loss on similarity matrices (no softmax, no temperature)
+            kl_loss = F.mse_loss(student_sim, teacher_sim)
 
         return kl_loss

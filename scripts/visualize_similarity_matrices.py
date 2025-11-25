@@ -2,7 +2,13 @@
 Visualize student and teacher similarity matrices from saved hidden states.
 
 Usage:
-    python visualize_similarity_matrices.py --normalize [True/False]
+    python visualize_similarity_matrices.py --normalize [True/False] --common_scale [True/False]
+
+Arguments:
+    --normalize: L2 normalize hidden states before computing similarity (default: True)
+    --temperature: Temperature for scaling similarity matrices (default: 1.0)
+    --mask_diagonal: Mask diagonal with -inf (default: False)
+    --common_scale: Use common color scale for both plots (default: False)
 
 Controls:
     Right Arrow / Space: Next batch
@@ -15,6 +21,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import sys
+from scipy.special import softmax
 
 # Default path
 DEFAULT_HIDDEN_STATES_DIR = Path("/home/elias/Thesis/hidden_states_logs/")
@@ -60,7 +67,7 @@ def compute_similarity_matrix(hidden_states, normalize=True):
 
 def apply_temperature_and_masking(sim_matrix, temperature=1.0, mask_diagonal=False):
     """
-    Apply temperature scaling and optional diagonal masking to similarity matrix.
+    Apply temperature scaling, optional diagonal masking, and softmax to similarity matrix.
 
     Args:
         sim_matrix: [batch_size, batch_size] similarity matrix
@@ -68,7 +75,7 @@ def apply_temperature_and_masking(sim_matrix, temperature=1.0, mask_diagonal=Fal
         mask_diagonal: If True, set diagonal to -inf (softmax will give 0)
 
     Returns:
-        processed_matrix: similarity matrix with temperature applied and optional diagonal masking
+        processed_matrix: similarity matrix with temperature, masking, and softmax applied
     """
     # Apply temperature scaling
     processed = sim_matrix / temperature if temperature != 1.0 else sim_matrix.copy()
@@ -78,17 +85,21 @@ def apply_temperature_and_masking(sim_matrix, temperature=1.0, mask_diagonal=Fal
         # Set diagonal to -inf so softmax gives 0
         np.fill_diagonal(processed, -np.inf)
 
+    # Apply softmax across each row to get probability distribution
+    processed = softmax(processed, axis=1)
+
     return processed
 
 
 class InteractiveBrowser:
     """Interactive browser for similarity matrices."""
 
-    def __init__(self, hidden_states_dir, normalize=True, temperature=1.0, mask_diagonal=False):
+    def __init__(self, hidden_states_dir, normalize=True, temperature=1.0, mask_diagonal=False, common_scale=False):
         self.hidden_states_dir = Path(hidden_states_dir)
         self.normalize = normalize
         self.temperature = temperature
         self.mask_diagonal = mask_diagonal
+        self.common_scale = common_scale
         self.current_batch = 0
         self.max_batch = self._find_max_batch()
 
@@ -152,9 +163,18 @@ class InteractiveBrowser:
         student_sim = apply_temperature_and_masking(student_sim, temperature=self.temperature, mask_diagonal=self.mask_diagonal)
         teacher_sim = apply_temperature_and_masking(teacher_sim, temperature=self.temperature, mask_diagonal=self.mask_diagonal)
 
+        # Determine color scale
+        if self.common_scale:
+            # Use common min/max across both matrices
+            vmin = min(student_sim.min(), teacher_sim.min())
+            vmax = max(student_sim.max(), teacher_sim.max())
+        else:
+            vmin = None
+            vmax = None
+
         # Update left plot (student)
         self.axes[0].clear()
-        self.im1 = self.axes[0].imshow(student_sim, cmap="viridis", aspect="auto")
+        self.im1 = self.axes[0].imshow(student_sim, cmap="viridis", aspect="auto", vmin=vmin, vmax=vmax)
         self.axes[0].set_title(f"Student Similarity Matrix\n(Batch {batch_data['batch_idx']}, Size {batch_data['batch_size']})")
         self.axes[0].set_xlabel("Sample Index")
         self.axes[0].set_ylabel("Sample Index")
@@ -164,7 +184,7 @@ class InteractiveBrowser:
 
         # Update right plot (teacher)
         self.axes[1].clear()
-        self.im2 = self.axes[1].imshow(teacher_sim, cmap="viridis", aspect="auto")
+        self.im2 = self.axes[1].imshow(teacher_sim, cmap="viridis", aspect="auto", vmin=vmin, vmax=vmax)
         self.axes[1].set_title("Teacher Similarity Matrix")
         self.axes[1].set_xlabel("Sample Index")
         self.axes[1].set_ylabel("Sample Index")
@@ -177,6 +197,7 @@ class InteractiveBrowser:
             f"Aggregation: {batch_data['aggregation_method']} | "
             f"Normalize: {self.normalize} | "
             f"Temperature: {self.temperature} | "
+            f"Common Scale: {self.common_scale} | "
             f"Batch {batch_idx}/{self.max_batch} | "
             f"Use arrow keys to navigate, q to quit",
             fontsize=10,
@@ -221,6 +242,7 @@ class InteractiveBrowser:
         print(f"Normalization: {self.normalize}")
         print(f"Temperature: {self.temperature}")
         print(f"Diagonal Masking: {self.mask_diagonal}")
+        print(f"Common Scale: {self.common_scale}")
         print("\nControls:")
         print("  Right Arrow / Space: Next batch")
         print("  Left Arrow / Backspace: Previous batch")
@@ -268,6 +290,12 @@ def main():
         default=False,
         help="Whether to mask diagonal with -inf (softmax will give 0 on diagonal, default: False)"
     )
+    parser.add_argument(
+        "--common_scale",
+        type=lambda x: x.lower() == "true",
+        default=False,
+        help="Whether to use common color scale for both student and teacher matrices (default: False)"
+    )
 
     args = parser.parse_args()
 
@@ -282,7 +310,8 @@ def main():
         hidden_states_dir,
         normalize=args.normalize,
         temperature=args.temperature,
-        mask_diagonal=args.mask_diagonal
+        mask_diagonal=args.mask_diagonal,
+        common_scale=args.common_scale
     )
     browser.run()
 

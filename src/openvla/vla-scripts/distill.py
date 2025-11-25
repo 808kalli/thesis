@@ -99,11 +99,12 @@ class FinetuneConfig:
     distill_weight: float = 0.1                                     # Weight of distillation loss in total loss
     aggregation_method: str = "mean"                                # How to aggregate sequence: "last" or "mean"
     frame_alignment_mode: str = "interpolated"                   # Frame alignment: "supervised_only" or "interpolated"
-    distill_temperature: float = 1.0                                # Temperature for similarity matrix softmax
+    distill_temperature: float = 1.0                                # Temperature for similarity matrix softmax (only used if apply_softmax=True)
     distill_normalize: bool = True                                  # Whether to L2 normalize before similarity computation
     distill_mask_diagonal: bool = True                              # Whether to mask diagonal in similarity matrix (self-similarity)
     distill_projection_dim: Optional[int] = None                    # Optional projection dimension for hidden states
     distill_use_layer_norm: bool = False                            # Whether to use LayerNorm for per-sample stabilization
+    distill_apply_softmax: bool = True                              # Whether to apply softmax before computing KL divergence
     distill_gradient_clip_norm: float = 1.0                         # Gradient clipping norm (prevents exploding gradients)
 
     # Tracking Parameters
@@ -309,6 +310,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         print(f"Initializing knowledge distillation...")
         print(f"  - Teacher Dataset H5: {cfg.teacher_dataset_h5_path}")
         print(f"  - Distill Weight: {cfg.distill_weight}")
+        print(f"  - Apply Softmax: {cfg.distill_apply_softmax}")
         print(f"  - Temperature: {cfg.distill_temperature}")
         print(f"  - Normalize: {cfg.distill_normalize}")
         print(f"  - Mask Diagonal: {cfg.distill_mask_diagonal}")
@@ -339,6 +341,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         mask_diagonal=cfg.distill_mask_diagonal,
         projection_dim=cfg.distill_projection_dim,
         use_layer_norm=cfg.distill_use_layer_norm,
+        apply_softmax=cfg.distill_apply_softmax,
     ).to(device_id)
 
     # Create Optimizer =>> note that we default to a simple constant learning rate!
