@@ -6,7 +6,8 @@ Usage:
 
 Arguments:
     --normalize: L2 normalize hidden states before computing similarity (default: True)
-    --temperature: Temperature for scaling similarity matrices (default: 1.0, only used if apply_softmax=True)
+    --temperature_student: Temperature for student similarity matrices (default: 1.0, only used if apply_softmax=True)
+    --temperature_teacher: Temperature for teacher similarity matrices (default: 1.0, only used if apply_softmax=True)
     --mask_diagonal: Mask diagonal with -inf (default: False)
     --common_scale: Use common color scale for both plots (default: False)
     --apply_softmax: Apply softmax to similarity matrices (default: True)
@@ -99,10 +100,11 @@ def apply_temperature_and_masking(sim_matrix, temperature=1.0, mask_diagonal=Fal
 class InteractiveBrowser:
     """Interactive browser for similarity matrices."""
 
-    def __init__(self, hidden_states_dir, normalize=True, temperature=1.0, mask_diagonal=False, common_scale=False, apply_softmax=True):
+    def __init__(self, hidden_states_dir, normalize=True, temperature_student=1.0, temperature_teacher=1.0, mask_diagonal=False, common_scale=False, apply_softmax=True):
         self.hidden_states_dir = Path(hidden_states_dir)
         self.normalize = normalize
-        self.temperature = temperature
+        self.temperature_student = temperature_student
+        self.temperature_teacher = temperature_teacher
         self.mask_diagonal = mask_diagonal
         self.common_scale = common_scale
         self.apply_softmax = apply_softmax
@@ -165,9 +167,9 @@ class InteractiveBrowser:
         student_sim = compute_similarity_matrix(batch_data["student_hidden"], normalize=self.normalize)
         teacher_sim = compute_similarity_matrix(batch_data["teacher_hidden"], normalize=self.normalize)
 
-        # Apply temperature scaling, optional diagonal masking, and optional softmax
-        student_sim = apply_temperature_and_masking(student_sim, temperature=self.temperature, mask_diagonal=self.mask_diagonal, apply_softmax=self.apply_softmax)
-        teacher_sim = apply_temperature_and_masking(teacher_sim, temperature=self.temperature, mask_diagonal=self.mask_diagonal, apply_softmax=self.apply_softmax)
+        # Apply temperature scaling, optional diagonal masking, and optional softmax (with separate temperatures)
+        student_sim = apply_temperature_and_masking(student_sim, temperature=self.temperature_student, mask_diagonal=self.mask_diagonal, apply_softmax=self.apply_softmax)
+        teacher_sim = apply_temperature_and_masking(teacher_sim, temperature=self.temperature_teacher, mask_diagonal=self.mask_diagonal, apply_softmax=self.apply_softmax)
 
         # Determine color scale
         if self.common_scale:
@@ -203,7 +205,8 @@ class InteractiveBrowser:
             f"Aggregation: {batch_data['aggregation_method']} | "
             f"Normalize: {self.normalize} | "
             f"Apply Softmax: {self.apply_softmax} | "
-            f"Temperature: {self.temperature} | "
+            f"Temp (Student): {self.temperature_student} | "
+            f"Temp (Teacher): {self.temperature_teacher} | "
             f"Common Scale: {self.common_scale} | "
             f"Batch {batch_idx}/{self.max_batch} | "
             f"Use arrow keys to navigate, q to quit",
@@ -248,7 +251,8 @@ class InteractiveBrowser:
         print(f"Found {self.max_batch + 1} batches (0-{self.max_batch})")
         print(f"Normalization: {self.normalize}")
         print(f"Apply Softmax: {self.apply_softmax}")
-        print(f"Temperature: {self.temperature}")
+        print(f"Temperature (Student): {self.temperature_student}")
+        print(f"Temperature (Teacher): {self.temperature_teacher}")
         print(f"Diagonal Masking: {self.mask_diagonal}")
         print(f"Common Scale: {self.common_scale}")
         print("\nControls:")
@@ -287,10 +291,16 @@ def main():
         help="Whether to L2 normalize hidden states before computing similarity (default: True)"
     )
     parser.add_argument(
-        "--temperature",
+        "--temperature_student",
         type=float,
         default=1.0,
-        help="Temperature for scaling similarity matrices (higher = softer softmax, default: 1.0)"
+        help="Temperature for student similarity matrices (higher = softer softmax, default: 1.0)"
+    )
+    parser.add_argument(
+        "--temperature_teacher",
+        type=float,
+        default=1.0,
+        help="Temperature for teacher similarity matrices (higher = softer softmax, default: 1.0)"
     )
     parser.add_argument(
         "--mask_diagonal",
@@ -323,7 +333,8 @@ def main():
     browser = InteractiveBrowser(
         hidden_states_dir,
         normalize=args.normalize,
-        temperature=args.temperature,
+        temperature_student=args.temperature_student,
+        temperature_teacher=args.temperature_teacher,
         mask_diagonal=args.mask_diagonal,
         common_scale=args.common_scale,
         apply_softmax=args.apply_softmax

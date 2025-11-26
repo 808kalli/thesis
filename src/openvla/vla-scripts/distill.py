@@ -99,7 +99,8 @@ class FinetuneConfig:
     distill_weight: float = 0.1                                     # Weight of distillation loss in total loss
     aggregation_method: str = "mean"                                # How to aggregate sequence: "last" or "mean"
     frame_alignment_mode: str = "interpolated"                   # Frame alignment: "supervised_only" or "interpolated"
-    distill_temperature: float = 1.0                                # Temperature for similarity matrix softmax (only used if apply_softmax=True)
+    distill_temperature_student: float = 1.0                        # Temperature for student similarity matrix softmax (only used if apply_softmax=True)
+    distill_temperature_teacher: float = 1.0                        # Temperature for teacher similarity matrix softmax (only used if apply_softmax=True)
     distill_normalize: bool = True                                  # Whether to L2 normalize before similarity computation
     distill_mask_diagonal: bool = True                              # Whether to mask diagonal in similarity matrix (self-similarity)
     distill_projection_dim: Optional[int] = None                    # Optional projection dimension for hidden states
@@ -311,7 +312,8 @@ def finetune(cfg: FinetuneConfig) -> None:
         print(f"  - Teacher Dataset H5: {cfg.teacher_dataset_h5_path}")
         print(f"  - Distill Weight: {cfg.distill_weight}")
         print(f"  - Apply Softmax: {cfg.distill_apply_softmax}")
-        print(f"  - Temperature: {cfg.distill_temperature}")
+        print(f"  - Temperature (Student): {cfg.distill_temperature_student}")
+        print(f"  - Temperature (Teacher): {cfg.distill_temperature_teacher}")
         print(f"  - Normalize: {cfg.distill_normalize}")
         print(f"  - Mask Diagonal: {cfg.distill_mask_diagonal}")
         print(f"  - Use LayerNorm: {cfg.distill_use_layer_norm}")
@@ -336,7 +338,8 @@ def finetune(cfg: FinetuneConfig) -> None:
     distillation_loss_fn = SimilarityMatrixDistillationLoss(
         student_hidden_dim=4096,
         teacher_hidden_dim=4096,
-        temperature=cfg.distill_temperature,
+        temperature_student=cfg.distill_temperature_student,
+        temperature_teacher=cfg.distill_temperature_teacher,
         normalize=cfg.distill_normalize,
         mask_diagonal=cfg.distill_mask_diagonal,
         projection_dim=cfg.distill_projection_dim,

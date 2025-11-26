@@ -113,7 +113,8 @@ class SimilarityMatrixDistillationLoss(nn.Module):
         self,
         student_hidden_dim: int = 4096,
         teacher_hidden_dim: int = 4096,
-        temperature: float = 1.0,
+        temperature_student: float = 1.0,
+        temperature_teacher: float = 1.0,
         normalize: bool = True,
         mask_diagonal: bool = True,
         projection_dim: Optional[int] = None,
@@ -124,7 +125,8 @@ class SimilarityMatrixDistillationLoss(nn.Module):
         Args:
             student_hidden_dim: Dimension of student hidden states
             teacher_hidden_dim: Dimension of teacher hidden states
-            temperature: Temperature for softmax (higher = softer, only used if apply_softmax=True)
+            temperature_student: Temperature for student softmax (higher = softer, only used if apply_softmax=True)
+            temperature_teacher: Temperature for teacher softmax (higher = softer, only used if apply_softmax=True)
             normalize: Whether to L2 normalize before computing similarity
             mask_diagonal: Whether to mask diagonal with -inf (softmax will give 0)
             projection_dim: If specified, project to this dimension before similarity computation
@@ -132,7 +134,8 @@ class SimilarityMatrixDistillationLoss(nn.Module):
             apply_softmax: Whether to apply softmax before KL divergence (default: True)
         """
         super().__init__()
-        self.temperature = temperature
+        self.temperature_student = temperature_student
+        self.temperature_teacher = temperature_teacher
         self.normalize = normalize
         self.mask_diagonal = mask_diagonal
         self.use_layer_norm = use_layer_norm
@@ -198,12 +201,13 @@ class SimilarityMatrixDistillationLoss(nn.Module):
 
         # Apply temperature scaling (only affects loss if softmax is applied)
         if self.apply_softmax:
-            student_sim = student_sim / self.temperature
-            teacher_sim = teacher_sim / self.temperature
+            # Scale with separate temperatures for student and teacher
+            student_sim_scaled = student_sim / self.temperature_student
+            teacher_sim_scaled = teacher_sim / self.temperature_teacher
 
             # Convert to probability distributions
-            student_prob = F.softmax(student_sim, dim=1)  # [batch, batch]
-            teacher_prob = F.softmax(teacher_sim, dim=1)  # [batch, batch]
+            student_prob = F.softmax(student_sim_scaled, dim=1)  # [batch, batch]
+            teacher_prob = F.softmax(teacher_sim_scaled, dim=1)  # [batch, batch]
 
             # KL divergence: KL(P || Q) = sum(P * log(P/Q))
             kl_loss = F.kl_div(
