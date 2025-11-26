@@ -7,6 +7,7 @@ This module provides:
 1. AggregationMethod: Enum for sequence aggregation methods (LAST or MEAN)
 2. StudentSequenceProjectionMLP: Projects student hidden states through bottleneck MLP
 3. SimilarityMatrixDistillationLoss: KL divergence loss on similarity matrices
+4. InfoNCEDistillationLoss: InfoNCE contrastive loss on cross-modal similarities
 
 Note: Teacher states are precomputed and aggregated offline using precompute_teacher_dataset.py
 """
@@ -220,3 +221,104 @@ class SimilarityMatrixDistillationLoss(nn.Module):
             kl_loss = F.mse_loss(student_sim, teacher_sim)
 
         return kl_loss
+
+
+class InfoNCEDistillationLoss(nn.Module):
+    """
+    InfoNCE contrastive loss between student and teacher hidden states.
+
+    Key idea:
+    - Treats student and teacher embeddings as two views of the same sample
+    - For each student sample i, the positive pair is teacher sample i
+    - Negative pairs are all other teacher samples j != i
+    - Loss: -log(exp(sim(S_i, T_i) / tau) / sum_j exp(sim(S_i, T_j) / tau))
+
+    Formula:
+        G_ij = (S~_i^T @ T~_j) / tau  (cross-modal similarity matrix)
+        L_NCE = -1/M * sum_i log(exp(G_ii) / sum_j exp(G_ij))
+
+    Where:
+        - S~_i = S_i / ||S_i|| (normalized student embedding)
+        - T~_j = T_j / ||T_j|| (normalized teacher embedding)
+        - tau = temperature parameter
+        - M = batch size (number of supervised samples)
+    """
+
+    def __init__(
+        self,
+        student_hidden_dim: int = 4096,
+        teacher_hidden_dim: int = 4096,
+        temperature: float = 0.1,
+        normalize: bool = True,
+        projection_dim: Optional[int] = None,
+        use_layer_norm: bool = False,
+    ):
+        """
+        Args:
+            student_hidden_dim: Dimension of student hidden states
+            teacher_hidden_dim: Dimension of teacher hidden states
+            temperature: Temperature for scaling similarities (lower = sharper distribution)
+            normalize: Whether to L2 normalize before computing similarity
+            projection_dim: If specified, project to this dimension before similarity computation
+            use_layer_norm: Whether to apply LayerNorm per sample (useful when normalize=False)
+        """
+        super().__init__()
+        self.temperature = temperature
+        self.normalize = normalize
+        self.use_layer_norm = use_layer_norm
+
+        # Optional projection layer to match dimensions
+        self.projection = None
+        if projection_dim is not None:
+            self.projection = nn.Linear(teacher_hidden_dim, projection_dim)
+
+        # Optional LayerNorm for per-sample stabilization
+        self.student_ln = None
+        self.teacher_ln = None
+        if use_layer_norm:
+            self.student_ln = nn.LayerNorm(student_hidden_dim)
+            self.teacher_ln = nn.LayerNorm(teacher_hidden_dim)
+
+    def forward(
+        self,
+        student_hidden_states: torch.Tensor,  # [batch, hidden_dim]
+        teacher_hidden_states: torch.Tensor,  # [batch, hidden_dim]
+    ) -> torch.Tensor:
+        """
+        Args:
+            student_hidden_states: [batch, hidden_dim] - student embeddings
+            teacher_hidden_states: [batch, hidden_dim] - teacher embeddings
+
+        Returns:
+            loss: scalar InfoNCE contrastive loss
+        """
+        # Convert to float32 for loss computation
+        student_hidden_states = student_hidden_states.float()
+        teacher_hidden_states = teacher_hidden_states.float()
+
+        # Optional projection
+        if self.projection is not None:
+            student_hidden_states = self.projection(student_hidden_states)
+            teacher_hidden_states = self.projection(teacher_hidden_states)
+
+        # Optional normalization (critical for InfoNCE)
+        if self.normalize:
+            student_hidden_states = F.normalize(student_hidden_states, p=2, dim=1)  # [batch, hidden_dim]
+            teacher_hidden_states = F.normalize(teacher_hidden_states, p=2, dim=1)  # [batch, hidden_dim]
+
+        # Optional LayerNorm for per-sample stabilization (independent of L2 norm)
+        if self.use_layer_norm:
+            student_hidden_states = self.student_ln(student_hidden_states)
+            teacher_hidden_states = self.teacher_ln(teacher_hidden_states)
+
+        # Build cross-modal similarity matrix: G_ij = S~_i^T @ T~_j / tau
+        # [batch, batch] where G[i,j] is similarity between student i and teacher j
+        similarity_matrix = torch.mm(student_hidden_states, teacher_hidden_states.t())  # [batch, batch]
+        similarity_matrix = similarity_matrix / self.temperature  # Apply temperature scaling
+
+        # InfoNCE loss: -1/M * sum_i log(exp(G_ii) / sum_j exp(G_ij))
+        # Numerically stable version using log-sum-exp trick
+        log_probs = similarity_matrix - torch.logsumexp(similarity_matrix, dim=1, keepdim=True)  # [batch, batch]
+        loss = -log_probs.diagonal().mean()  # Extract diagonal and average
+
+        return loss

@@ -57,6 +57,7 @@ from distillation_utils import (
     AggregationMethod,
     StudentSequenceProjectionMLP,
     SimilarityMatrixDistillationLoss,
+    InfoNCEDistillationLoss,
 )
 
 # Sane Defaults
@@ -97,15 +98,17 @@ class FinetuneConfig:
     use_distillation: bool = True                                  # Whether to use knowledge distillation from teacher
     teacher_dataset_h5_path: Optional[Path] = None                  # Path to precomputed teacher_dataset_interpolated.h5 file
     distill_weight: float = 0.1                                     # Weight of distillation loss in total loss
+    distill_loss_type: str = "kl_divergence"                        # Type of distillation loss: "kl_divergence" or "infonce"
     aggregation_method: str = "mean"                                # How to aggregate sequence: "last" or "mean"
     frame_alignment_mode: str = "interpolated"                   # Frame alignment: "supervised_only" or "interpolated"
-    distill_temperature_student: float = 1.0                        # Temperature for student similarity matrix softmax (only used if apply_softmax=True)
-    distill_temperature_teacher: float = 1.0                        # Temperature for teacher similarity matrix softmax (only used if apply_softmax=True)
+    distill_temperature_student: float = 1.0                        # Temperature for student similarity matrix softmax (only used if apply_softmax=True and loss_type=kl_divergence)
+    distill_temperature_teacher: float = 1.0                        # Temperature for teacher similarity matrix softmax (only used if apply_softmax=True and loss_type=kl_divergence)
+    distill_temperature: float = 0.1                                # Temperature for InfoNCE loss (only used if loss_type=infonce)
     distill_normalize: bool = True                                  # Whether to L2 normalize before similarity computation
-    distill_mask_diagonal: bool = True                              # Whether to mask diagonal in similarity matrix (self-similarity)
+    distill_mask_diagonal: bool = True                              # Whether to mask diagonal in similarity matrix (only for kl_divergence)
     distill_projection_dim: Optional[int] = None                    # Optional projection dimension for hidden states
     distill_use_layer_norm: bool = False                            # Whether to use LayerNorm for per-sample stabilization
-    distill_apply_softmax: bool = True                              # Whether to apply softmax before computing KL divergence
+    distill_apply_softmax: bool = True                              # Whether to apply softmax before computing KL divergence (only for kl_divergence)
     distill_gradient_clip_norm: float = 1.0                         # Gradient clipping norm (prevents exploding gradients)
 
     # Tracking Parameters
@@ -310,12 +313,16 @@ def finetune(cfg: FinetuneConfig) -> None:
     if distributed_state.is_main_process:
         print(f"Initializing knowledge distillation...")
         print(f"  - Teacher Dataset H5: {cfg.teacher_dataset_h5_path}")
+        print(f"  - Loss Type: {cfg.distill_loss_type}")
         print(f"  - Distill Weight: {cfg.distill_weight}")
-        print(f"  - Apply Softmax: {cfg.distill_apply_softmax}")
-        print(f"  - Temperature (Student): {cfg.distill_temperature_student}")
-        print(f"  - Temperature (Teacher): {cfg.distill_temperature_teacher}")
+        if cfg.distill_loss_type == "kl_divergence":
+            print(f"  - Apply Softmax: {cfg.distill_apply_softmax}")
+            print(f"  - Temperature (Student): {cfg.distill_temperature_student}")
+            print(f"  - Temperature (Teacher): {cfg.distill_temperature_teacher}")
+            print(f"  - Mask Diagonal: {cfg.distill_mask_diagonal}")
+        elif cfg.distill_loss_type == "infonce":
+            print(f"  - Temperature (InfoNCE): {cfg.distill_temperature}")
         print(f"  - Normalize: {cfg.distill_normalize}")
-        print(f"  - Mask Diagonal: {cfg.distill_mask_diagonal}")
         print(f"  - Use LayerNorm: {cfg.distill_use_layer_norm}")
         print(f"  - Gradient Clip Norm: {cfg.distill_gradient_clip_norm}")
 
@@ -341,18 +348,30 @@ def finetune(cfg: FinetuneConfig) -> None:
         aggregation_method=aggregation_enum,
     ).to(device_id)
 
-    # Initialize distillation loss
-    distillation_loss_fn = SimilarityMatrixDistillationLoss(
-        student_hidden_dim=4096,
-        teacher_hidden_dim=4096,
-        temperature_student=cfg.distill_temperature_student,
-        temperature_teacher=cfg.distill_temperature_teacher,
-        normalize=cfg.distill_normalize,
-        mask_diagonal=cfg.distill_mask_diagonal,
-        projection_dim=cfg.distill_projection_dim,
-        use_layer_norm=cfg.distill_use_layer_norm,
-        apply_softmax=cfg.distill_apply_softmax,
-    ).to(device_id)
+    # Initialize distillation loss based on loss type
+    if cfg.distill_loss_type == "kl_divergence":
+        distillation_loss_fn = SimilarityMatrixDistillationLoss(
+            student_hidden_dim=4096,
+            teacher_hidden_dim=4096,
+            temperature_student=cfg.distill_temperature_student,
+            temperature_teacher=cfg.distill_temperature_teacher,
+            normalize=cfg.distill_normalize,
+            mask_diagonal=cfg.distill_mask_diagonal,
+            projection_dim=cfg.distill_projection_dim,
+            use_layer_norm=cfg.distill_use_layer_norm,
+            apply_softmax=cfg.distill_apply_softmax,
+        ).to(device_id)
+    elif cfg.distill_loss_type == "infonce":
+        distillation_loss_fn = InfoNCEDistillationLoss(
+            student_hidden_dim=4096,
+            teacher_hidden_dim=4096,
+            temperature=cfg.distill_temperature,
+            normalize=cfg.distill_normalize,
+            projection_dim=cfg.distill_projection_dim,
+            use_layer_norm=cfg.distill_use_layer_norm,
+        ).to(device_id)
+    else:
+        raise ValueError(f"Unknown distill_loss_type: {cfg.distill_loss_type}. Must be 'kl_divergence' or 'infonce'")
 
     # Create Optimizer =>> note that we default to a simple constant learning rate!
     # IMPORTANT: Must be after distillation module initialization so their parameters are included
