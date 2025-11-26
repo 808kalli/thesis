@@ -323,6 +323,13 @@ def finetune(cfg: FinetuneConfig) -> None:
     import h5py
     teacher_dataset_file = h5py.File(str(cfg.teacher_dataset_h5_path), "r")
 
+    # Build lookup: global_index -> position in H5 file
+    teacher_global_indices = teacher_dataset_file["global_indices"][:]
+    global_idx_to_h5_position = {int(g_idx): pos for pos, g_idx in enumerate(teacher_global_indices)}
+
+    if distributed_state.is_main_process:
+        print(f"  - Loaded {len(teacher_global_indices)} teacher states")
+
     # Note: No aggregation needed for teacher - already in precomputed dataset
     aggregation_enum = AggregationMethod(cfg.aggregation_method)
 
@@ -438,9 +445,13 @@ def finetune(cfg: FinetuneConfig) -> None:
             teacher_hidden_aggregated_list = []
 
             for global_idx in global_indices:
-                # Index into teacher H5 using the actual global index from the dataset
+                # Look up position in H5 file using global_idx
+                global_idx_int = int(global_idx)
+                h5_position = global_idx_to_h5_position[global_idx_int]
+
+                # Fetch from H5 using the position
                 teacher_state = torch.from_numpy(
-                    np.array(teacher_dataset_file["hidden_states"][int(global_idx)], dtype=np.float32)
+                    np.array(teacher_dataset_file["hidden_states"][h5_position], dtype=np.float32)
                 )
                 teacher_hidden_aggregated_list.append(teacher_state)
 
