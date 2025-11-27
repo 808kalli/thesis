@@ -135,6 +135,8 @@ def save_checkpoint(
     cfg,
     distributed_state,
     adapter_dir=None,
+    sequence_aggregation_student=None,
+    distillation_loss_fn=None,
 ):
     """Save complete training state for resumption."""
     if distributed_state.is_main_process:
@@ -158,6 +160,14 @@ def save_checkpoint(
             'rng_state': torch.get_rng_state(),
             'cuda_rng_state': [state.cpu() for state in torch.cuda.get_rng_state_all()],  # Move to CPU
         }
+
+        # Save distillation modules if using distillation
+        if cfg.use_distillation:
+            if sequence_aggregation_student is not None:
+                training_state['sequence_aggregation_student'] = sequence_aggregation_student.state_dict()
+            if distillation_loss_fn is not None:
+                training_state['distillation_loss_fn'] = distillation_loss_fn.state_dict()
+
         torch.save(training_state, checkpoint_dir / "training_state.pt")
 
     # Wait for main process to finish saving
@@ -179,37 +189,48 @@ def save_checkpoint(
     dist.barrier()
 
 
-def load_checkpoint(checkpoint_dir, optimizer, device_id, distributed_state):
+def load_checkpoint(checkpoint_dir, optimizer, device_id, distributed_state, sequence_aggregation_student=None, distillation_loss_fn=None):
     """Load complete training state for resumption."""
     training_state_path = checkpoint_dir / "training_state.pt"
-    
+
     if not training_state_path.exists():
         if distributed_state.is_main_process:
             print(f"No training state found at {training_state_path}")
         return None
-    
+
     if distributed_state.is_main_process:
         print(f"Loading training state from {training_state_path}")
-    
+
     training_state = torch.load(training_state_path, map_location='cpu')  # Load to CPU first
-    
+
     # Restore optimizer state
     optimizer.load_state_dict(training_state['optimizer_state_dict'])
-    
+
     # Restore RNG states
     torch.set_rng_state(training_state['rng_state'])
-    
+
     # Restore CUDA RNG states - ensure they're ByteTensors
     cuda_rng_states = training_state['cuda_rng_state']
     if isinstance(cuda_rng_states, list):
         # Convert to ByteTensor if needed and move to appropriate device
-        cuda_rng_states = [state.to(torch.uint8) if state.dtype != torch.uint8 else state 
+        cuda_rng_states = [state.to(torch.uint8) if state.dtype != torch.uint8 else state
                           for state in cuda_rng_states]
         torch.cuda.set_rng_state_all(cuda_rng_states)
-    
+
+    # Restore distillation modules if they were saved
+    if sequence_aggregation_student is not None and 'sequence_aggregation_student' in training_state:
+        sequence_aggregation_student.load_state_dict(training_state['sequence_aggregation_student'])
+        if distributed_state.is_main_process:
+            print("✓ Loaded sequence_aggregation_student weights")
+
+    if distillation_loss_fn is not None and 'distillation_loss_fn' in training_state:
+        distillation_loss_fn.load_state_dict(training_state['distillation_loss_fn'])
+        if distributed_state.is_main_process:
+            print("✓ Loaded distillation_loss_fn weights")
+
     if distributed_state.is_main_process:
         print(f"Resumed from gradient step {training_state['gradient_step_idx']}, batch {training_state['batch_idx']}")
-    
+
     return training_state
 
 
@@ -404,7 +425,10 @@ def finetune(cfg: FinetuneConfig) -> None:
         if not checkpoint_dir.exists():
             raise ValueError(f"Checkpoint directory not found: {checkpoint_dir}")
 
-        training_state = load_checkpoint(checkpoint_dir, optimizer, device_id, distributed_state)
+        training_state = load_checkpoint(
+            checkpoint_dir, optimizer, device_id, distributed_state,
+            sequence_aggregation_student, distillation_loss_fn
+        )
         if training_state is not None:
             start_gradient_step = training_state['gradient_step_idx']
             start_batch_idx = training_state['batch_idx']
@@ -604,7 +628,8 @@ def finetune(cfg: FinetuneConfig) -> None:
                     save_checkpoint(
                         vla, optimizer, gradient_step_idx, batch_idx,
                         run_dir, processor, vla_dataset, cfg,
-                        distributed_state, adapter_dir if cfg.use_lora else None
+                        distributed_state, adapter_dir if cfg.use_lora else None,
+                        sequence_aggregation_student, distillation_loss_fn
                     )
                 else:
                     # Save checkpoint in new directory
@@ -618,7 +643,8 @@ def finetune(cfg: FinetuneConfig) -> None:
                     save_checkpoint(
                         vla, optimizer, gradient_step_idx, batch_idx,
                         checkpoint_dir_step, processor, vla_dataset, cfg,
-                        distributed_state, adapter_dir_step
+                        distributed_state, adapter_dir_step,
+                        sequence_aggregation_student, distillation_loss_fn
                     )
 
             # Stop training when max_steps is reached
