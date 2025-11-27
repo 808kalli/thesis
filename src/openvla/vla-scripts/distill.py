@@ -276,8 +276,14 @@ def finetune(cfg: FinetuneConfig) -> None:
     AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
     # Load OpenVLA Processor and Model using HF AutoClasses
-    # If resuming, load from checkpoint; otherwise load from original model
-    model_path = cfg.vla_path
+    # Determine model path: use checkpoint if resuming, otherwise use original model path
+    if cfg.resume and cfg.resume_from_checkpoint is not None:
+        model_path = cfg.resume_from_checkpoint
+        if distributed_state.is_main_process:
+            print(f"Resuming from checkpoint: {model_path}")
+    else:
+        model_path = cfg.vla_path
+
     processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
     vla = AutoModelForVision2Seq.from_pretrained(
         model_path,
@@ -402,39 +408,6 @@ def finetune(cfg: FinetuneConfig) -> None:
         if training_state is not None:
             start_gradient_step = training_state['gradient_step_idx']
             start_batch_idx = training_state['batch_idx']
-
-            # Memory-efficient checkpoint loading:
-            # 1. Delete old model to free GPU memory before loading new one
-            # 2. This avoids temporary double allocation that causes fragmentation
-            if distributed_state.is_main_process:
-                print(f"Loading checkpoint from {checkpoint_dir}...")
-
-            # Get the unwrapped model from DDP
-            old_model = vla.module
-            del vla  # Delete the entire DDP wrapper
-            del old_model  # Delete the old model
-
-            # Force CUDA cache clear to prevent fragmentation
-            if not cfg.use_quantization:
-                torch.cuda.empty_cache()
-
-            # Load model weights from checkpoint using from_pretrained (handles safetensors format)
-            vla_checkpoint = AutoModelForVision2Seq.from_pretrained(
-                checkpoint_dir,
-                torch_dtype=torch.bfloat16,
-                quantization_config=quantization_config,
-                low_cpu_mem_usage=True,
-                trust_remote_code=True,
-            )
-
-            # Move model to GPU (from_pretrained loads to CPU by default with low_cpu_mem_usage=True)
-            if cfg.use_quantization:
-                vla_checkpoint = prepare_model_for_kbit_training(vla_checkpoint)
-            else:
-                vla_checkpoint = vla_checkpoint.to(device_id)
-
-            # Re-wrap in DDP with the loaded model
-            vla = DDP(vla_checkpoint, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
 
             if distributed_state.is_main_process:
                 print(f"Resumed from step {start_gradient_step}, batch {start_batch_idx}")
