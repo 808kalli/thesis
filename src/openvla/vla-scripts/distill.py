@@ -403,6 +403,21 @@ def finetune(cfg: FinetuneConfig) -> None:
             start_gradient_step = training_state['gradient_step_idx']
             start_batch_idx = training_state['batch_idx']
 
+            # Memory-efficient checkpoint loading:
+            # 1. Delete old model to free GPU memory before loading new one
+            # 2. This avoids temporary double allocation that causes fragmentation
+            if distributed_state.is_main_process:
+                print(f"Loading checkpoint from {checkpoint_dir}...")
+
+            # Get the unwrapped model from DDP
+            old_model = vla.module
+            del vla  # Delete the entire DDP wrapper
+            del old_model  # Delete the old model
+
+            # Force CUDA cache clear to prevent fragmentation
+            if not cfg.use_quantization:
+                torch.cuda.empty_cache()
+
             # Load model weights from checkpoint using from_pretrained (handles safetensors format)
             vla_checkpoint = AutoModelForVision2Seq.from_pretrained(
                 checkpoint_dir,
@@ -413,11 +428,13 @@ def finetune(cfg: FinetuneConfig) -> None:
             )
 
             # Move model to GPU (from_pretrained loads to CPU by default with low_cpu_mem_usage=True)
-            if not cfg.use_quantization:
+            if cfg.use_quantization:
+                vla_checkpoint = prepare_model_for_kbit_training(vla_checkpoint)
+            else:
                 vla_checkpoint = vla_checkpoint.to(device_id)
 
-            # Replace the model in the DDP wrapper
-            vla.module = vla_checkpoint
+            # Re-wrap in DDP with the loaded model
+            vla = DDP(vla_checkpoint, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
 
             if distributed_state.is_main_process:
                 print(f"Resumed from step {start_gradient_step}, batch {start_batch_idx}")
