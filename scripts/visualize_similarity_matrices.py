@@ -1,16 +1,26 @@
 """
 Visualize student and teacher similarity matrices from saved hidden states.
 
+Supports two loss types:
+1. KL-Divergence: Shows self-similarity matrices for student and teacher
+2. InfoNCE: Shows cross-modal similarity matrix between student and teacher
+
 Usage:
-    python visualize_similarity_matrices.py --normalize [True/False] --common_scale [True/False] --apply_softmax [True/False]
+    python visualize_similarity_matrices.py [options]
 
 Arguments:
+    --loss_type: Type of loss to visualize - 'kl_divergence' (default) or 'infonce'
     --normalize: L2 normalize hidden states before computing similarity (default: True)
-    --temperature_student: Temperature for student similarity matrices (default: 1.0, only used if apply_softmax=True)
-    --temperature_teacher: Temperature for teacher similarity matrices (default: 1.0, only used if apply_softmax=True)
-    --mask_diagonal: Mask diagonal with -inf (default: False)
     --common_scale: Use common color scale for both plots (default: False)
-    --apply_softmax: Apply softmax to similarity matrices (default: True)
+
+    KL-Divergence options:
+        --temperature_student: Temperature for student similarity matrices (default: 1.0)
+        --temperature_teacher: Temperature for teacher similarity matrices (default: 1.0)
+        --mask_diagonal: Mask diagonal with -inf (default: False)
+        --apply_softmax: Apply softmax to similarity matrices (default: True)
+
+    InfoNCE options:
+        --temperature_infonce: Temperature for cross-modal similarities (default: 0.1)
 
 Controls:
     Right Arrow / Space: Next batch
@@ -23,7 +33,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import sys
-from scipy.special import softmax
+from scipy.special import softmax, logsumexp
 
 # Default path
 DEFAULT_HIDDEN_STATES_DIR = Path("/home/elias/Thesis/hidden_states_logs/")
@@ -97,10 +107,39 @@ def apply_temperature_and_masking(sim_matrix, temperature=1.0, mask_diagonal=Fal
     return processed
 
 
+def compute_infonce_cross_modal_matrix(student_hidden, teacher_hidden, normalize=True, temperature=0.1):
+    """
+    Compute cross-modal InfoNCE similarity matrix between student and teacher.
+
+    Args:
+        student_hidden: [batch_size, hidden_dim] - student embeddings
+        teacher_hidden: [batch_size, hidden_dim] - teacher embeddings
+        normalize: Whether to L2 normalize before computing similarity
+        temperature: Temperature for scaling (lower = sharper distribution)
+
+    Returns:
+        cross_modal_matrix: [batch_size, batch_size] cross-modal similarity matrix
+                           where (i,j) = student_i similarity to teacher_j
+    """
+    if normalize:
+        # L2 normalize
+        student_hidden = student_hidden / (np.linalg.norm(student_hidden, axis=1, keepdims=True) + 1e-8)
+        teacher_hidden = teacher_hidden / (np.linalg.norm(teacher_hidden, axis=1, keepdims=True) + 1e-8)
+
+    # Compute cross-modal similarity: S @ T.T
+    cross_modal = student_hidden @ teacher_hidden.T
+
+    # Apply temperature scaling
+    cross_modal = cross_modal / temperature
+
+    # Return raw similarity scores (temperature-scaled cross-modal similarities)
+    return cross_modal
+
+
 class InteractiveBrowser:
     """Interactive browser for similarity matrices."""
 
-    def __init__(self, hidden_states_dir, normalize=True, temperature_student=1.0, temperature_teacher=1.0, mask_diagonal=False, common_scale=False, apply_softmax=True):
+    def __init__(self, hidden_states_dir, normalize=True, temperature_student=1.0, temperature_teacher=1.0, mask_diagonal=False, common_scale=False, apply_softmax=True, loss_type="kl_divergence", temperature_infonce=0.1):
         self.hidden_states_dir = Path(hidden_states_dir)
         self.normalize = normalize
         self.temperature_student = temperature_student
@@ -108,6 +147,8 @@ class InteractiveBrowser:
         self.mask_diagonal = mask_diagonal
         self.common_scale = common_scale
         self.apply_softmax = apply_softmax
+        self.loss_type = loss_type  # "kl_divergence" or "infonce"
+        self.temperature_infonce = temperature_infonce
         self.current_batch = 0
         self.max_batch = self._find_max_batch()
 
@@ -129,7 +170,15 @@ class InteractiveBrowser:
 
     def create_figure(self):
         """Create the figure and axes once."""
-        self.fig, self.axes = plt.subplots(1, 2, figsize=(14, 6))
+        # Create 1 subplot for InfoNCE, 2 subplots for KL divergence
+        num_plots = 1 if self.loss_type == "infonce" else 2
+        figsize = (7, 6) if num_plots == 1 else (14, 6)
+        self.fig, self.axes = plt.subplots(1, num_plots, figsize=figsize)
+
+        # Ensure axes is always a list for consistency
+        if num_plots == 1:
+            self.axes = [self.axes]
+
         plt.tight_layout(pad=3.0)
         return self.fig
 
@@ -163,13 +212,33 @@ class InteractiveBrowser:
                     diff = np.linalg.norm(teacher_hidden[i] - teacher_hidden[j])
                     print(f"  State {i} vs {j}: {diff:.6f}")
 
-        # Compute similarity matrices
-        student_sim = compute_similarity_matrix(batch_data["student_hidden"], normalize=self.normalize)
-        teacher_sim = compute_similarity_matrix(batch_data["teacher_hidden"], normalize=self.normalize)
+        # Compute similarity matrices based on loss type
+        if self.loss_type == "kl_divergence":
+            student_sim = compute_similarity_matrix(batch_data["student_hidden"], normalize=self.normalize)
+            teacher_sim = compute_similarity_matrix(batch_data["teacher_hidden"], normalize=self.normalize)
 
-        # Apply temperature scaling, optional diagonal masking, and optional softmax (with separate temperatures)
-        student_sim = apply_temperature_and_masking(student_sim, temperature=self.temperature_student, mask_diagonal=self.mask_diagonal, apply_softmax=self.apply_softmax)
-        teacher_sim = apply_temperature_and_masking(teacher_sim, temperature=self.temperature_teacher, mask_diagonal=self.mask_diagonal, apply_softmax=self.apply_softmax)
+            # Apply temperature scaling, optional diagonal masking, and optional softmax (with separate temperatures)
+            student_sim = apply_temperature_and_masking(student_sim, temperature=self.temperature_student, mask_diagonal=self.mask_diagonal, apply_softmax=self.apply_softmax)
+            teacher_sim = apply_temperature_and_masking(teacher_sim, temperature=self.temperature_teacher, mask_diagonal=self.mask_diagonal, apply_softmax=self.apply_softmax)
+
+            plot_title_left = "Student Similarity Matrix (Self-similarity)"
+            plot_title_right = "Teacher Similarity Matrix (Self-similarity)"
+
+        elif self.loss_type == "infonce":
+            # Compute cross-modal InfoNCE similarity matrix
+            student_sim = compute_infonce_cross_modal_matrix(
+                batch_data["student_hidden"],
+                batch_data["teacher_hidden"],
+                normalize=self.normalize,
+                temperature=self.temperature_infonce
+            )
+            # For InfoNCE, both "plots" show the same cross-modal matrix (student→teacher)
+            teacher_sim = student_sim
+
+            plot_title_left = "InfoNCE Cross-Modal Matrix (log-probs)"
+            plot_title_right = "InfoNCE Cross-Modal Matrix (log-probs)"
+        else:
+            raise ValueError(f"Unknown loss_type: {self.loss_type}")
 
         # Determine color scale
         if self.common_scale:
@@ -180,38 +249,64 @@ class InteractiveBrowser:
             vmin = None
             vmax = None
 
-        # Update left plot (student)
-        self.axes[0].clear()
-        self.im1 = self.axes[0].imshow(student_sim, cmap="viridis", aspect="auto", vmin=vmin, vmax=vmax)
-        self.axes[0].set_title(f"Student Similarity Matrix\n(Batch {batch_data['batch_idx']}, Size {batch_data['batch_size']})")
-        self.axes[0].set_xlabel("Sample Index")
-        self.axes[0].set_ylabel("Sample Index")
-        if self.cbar1 is not None:
-            self.cbar1.remove()
-        self.cbar1 = plt.colorbar(self.im1, ax=self.axes[0])
+        if self.loss_type == "infonce":
+            # InfoNCE: Single cross-modal matrix
+            self.axes[0].clear()
+            self.im1 = self.axes[0].imshow(student_sim, cmap="viridis", aspect="auto", vmin=vmin, vmax=vmax)
+            self.axes[0].set_title(f"{plot_title_left}\n(Batch {batch_data['batch_idx']}, Size {batch_data['batch_size']})")
+            self.axes[0].set_xlabel("Teacher Sample Index")
+            self.axes[0].set_ylabel("Student Sample Index")
+            if self.cbar1 is not None:
+                self.cbar1.remove()
+            self.cbar1 = plt.colorbar(self.im1, ax=self.axes[0])
+        else:
+            # KL Divergence: Two self-similarity matrices
+            # Update left plot (student)
+            self.axes[0].clear()
+            self.im1 = self.axes[0].imshow(student_sim, cmap="viridis", aspect="auto", vmin=vmin, vmax=vmax)
+            self.axes[0].set_title(f"{plot_title_left}\n(Batch {batch_data['batch_idx']}, Size {batch_data['batch_size']})")
+            self.axes[0].set_xlabel("Sample Index")
+            self.axes[0].set_ylabel("Sample Index")
+            if self.cbar1 is not None:
+                self.cbar1.remove()
+            self.cbar1 = plt.colorbar(self.im1, ax=self.axes[0])
 
-        # Update right plot (teacher)
-        self.axes[1].clear()
-        self.im2 = self.axes[1].imshow(teacher_sim, cmap="viridis", aspect="auto", vmin=vmin, vmax=vmax)
-        self.axes[1].set_title("Teacher Similarity Matrix")
-        self.axes[1].set_xlabel("Sample Index")
-        self.axes[1].set_ylabel("Sample Index")
-        if self.cbar2 is not None:
-            self.cbar2.remove()
-        self.cbar2 = plt.colorbar(self.im2, ax=self.axes[1])
+            # Update right plot (teacher)
+            self.axes[1].clear()
+            self.im2 = self.axes[1].imshow(teacher_sim, cmap="viridis", aspect="auto", vmin=vmin, vmax=vmax)
+            self.axes[1].set_title(plot_title_right)
+            self.axes[1].set_xlabel("Sample Index")
+            self.axes[1].set_ylabel("Sample Index")
+            if self.cbar2 is not None:
+                self.cbar2.remove()
+            self.cbar2 = plt.colorbar(self.im2, ax=self.axes[1])
 
-        # Update title
-        self.fig.suptitle(
-            f"Aggregation: {batch_data['aggregation_method']} | "
-            f"Normalize: {self.normalize} | "
-            f"Apply Softmax: {self.apply_softmax} | "
-            f"Temp (Student): {self.temperature_student} | "
-            f"Temp (Teacher): {self.temperature_teacher} | "
-            f"Common Scale: {self.common_scale} | "
-            f"Batch {batch_idx}/{self.max_batch} | "
-            f"Use arrow keys to navigate, q to quit",
-            fontsize=10,
-        )
+        # Update title - show different parameters based on loss type
+        if self.loss_type == "kl_divergence":
+            title = (
+                f"Loss Type: KL-Divergence | "
+                f"Aggregation: {batch_data['aggregation_method']} | "
+                f"Normalize: {self.normalize} | "
+                f"Apply Softmax: {self.apply_softmax} | "
+                f"Temp (Student): {self.temperature_student} | "
+                f"Temp (Teacher): {self.temperature_teacher} | "
+                f"Mask Diagonal: {self.mask_diagonal} | "
+                f"Common Scale: {self.common_scale} | "
+                f"Batch {batch_idx}/{self.max_batch} | "
+                f"Use arrow keys to navigate, q to quit"
+            )
+        else:  # infonce
+            title = (
+                f"Loss Type: InfoNCE | "
+                f"Aggregation: {batch_data['aggregation_method']} | "
+                f"Normalize: {self.normalize} | "
+                f"Temperature: {self.temperature_infonce} | "
+                f"Common Scale: {self.common_scale} | "
+                f"Batch {batch_idx}/{self.max_batch} | "
+                f"Use arrow keys to navigate, q to quit"
+            )
+
+        self.fig.suptitle(title, fontsize=10)
 
         self.current_batch = batch_idx
         self.fig.canvas.draw()
@@ -249,11 +344,17 @@ class InteractiveBrowser:
 
         print(f"Loading batches from: {self.hidden_states_dir}")
         print(f"Found {self.max_batch + 1} batches (0-{self.max_batch})")
+        print(f"Loss Type: {self.loss_type}")
         print(f"Normalization: {self.normalize}")
-        print(f"Apply Softmax: {self.apply_softmax}")
-        print(f"Temperature (Student): {self.temperature_student}")
-        print(f"Temperature (Teacher): {self.temperature_teacher}")
-        print(f"Diagonal Masking: {self.mask_diagonal}")
+
+        if self.loss_type == "kl_divergence":
+            print(f"Apply Softmax: {self.apply_softmax}")
+            print(f"Temperature (Student): {self.temperature_student}")
+            print(f"Temperature (Teacher): {self.temperature_teacher}")
+            print(f"Diagonal Masking: {self.mask_diagonal}")
+        elif self.loss_type == "infonce":
+            print(f"Temperature (InfoNCE): {self.temperature_infonce}")
+
         print(f"Common Scale: {self.common_scale}")
         print("\nControls:")
         print("  Right Arrow / Space: Next batch")
@@ -320,6 +421,19 @@ def main():
         default=True,
         help="Whether to apply softmax to similarity matrices (default: True)"
     )
+    parser.add_argument(
+        "--loss_type",
+        type=str,
+        default="kl_divergence",
+        choices=["kl_divergence", "infonce"],
+        help="Type of loss visualization: 'kl_divergence' (self-similarity) or 'infonce' (cross-modal, default: kl_divergence)"
+    )
+    parser.add_argument(
+        "--temperature_infonce",
+        type=float,
+        default=0.1,
+        help="Temperature for InfoNCE loss visualization (lower = sharper, default: 0.1)"
+    )
 
     args = parser.parse_args()
 
@@ -337,7 +451,9 @@ def main():
         temperature_teacher=args.temperature_teacher,
         mask_diagonal=args.mask_diagonal,
         common_scale=args.common_scale,
-        apply_softmax=args.apply_softmax
+        apply_softmax=args.apply_softmax,
+        loss_type=args.loss_type,
+        temperature_infonce=args.temperature_infonce
     )
     browser.run()
 

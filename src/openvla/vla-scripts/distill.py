@@ -11,14 +11,15 @@ Notes & Benchmarks:
         + One 80 GB GPU can fit a Batch Size of 24
 
 Run with:
-    - [Single Node Multi-GPU (= $K) ]: torchrun --standalone --nnodes 1 --nproc-per-node $K vla-scripts/finetune.py
-    - [Override Config Values]: torchrun --standalone --nnodes 1 --nproc-per-node $K vla-scripts/finetune.py \
+    - [Single Node Multi-GPU (= $K) ]: torchrun --standalone --nnodes 1 --nproc-per-node $K vla-scripts/distill.py
+    - [Override Config Values]: torchrun --standalone --nnodes 1 --nproc-per-node $K vla-scripts/distill.py \
                                     --data_root_dir <PATH/TO/RLDS/DATASETS/DIRECTORY> \
                                     --dataset_name <DATASET_NAME> \
                                     --run_root_dir <PATH/TO/LOGS/DIR> \
+                                    --teacher_dataset_h5_path <PATH/TO/TEACHER/H5> \
                                     ...
-    - [Resume Training]: torchrun --standalone --nnodes 1 --nproc-per-node $K vla-scripts/finetune.py \
-                            --resume \
+    - [Resume Training]: torchrun --standalone --nnodes 1 --nproc-per-node $K vla-scripts/distill.py \
+                            --resume True \
                             --resume_from_checkpoint <PATH/TO/CHECKPOINT/DIR>
 """
 
@@ -115,6 +116,10 @@ class FinetuneConfig:
     wandb_project: str = "openvla"                                  # Name of W&B project to log to (use default!)
     wandb_entity: str = "eliaskallioras"                            # Name of entity to log under
     run_id_note: Optional[str] = None                               # Extra note for logging, Weights & Biases
+
+    # Resume Training Parameters
+    resume: bool = False                                            # Whether to resume training from a checkpoint
+    resume_from_checkpoint: Optional[Path] = None                   # Path to checkpoint directory to resume from
 
     # fmt: on
 
@@ -387,6 +392,37 @@ def finetune(cfg: FinetuneConfig) -> None:
     start_gradient_step = 0
     start_batch_idx = 0
 
+    # Load checkpoint if resuming training
+    if cfg.resume and cfg.resume_from_checkpoint is not None:
+        checkpoint_dir = Path(cfg.resume_from_checkpoint)
+        if not checkpoint_dir.exists():
+            raise ValueError(f"Checkpoint directory not found: {checkpoint_dir}")
+
+        training_state = load_checkpoint(checkpoint_dir, optimizer, device_id, distributed_state)
+        if training_state is not None:
+            start_gradient_step = training_state['gradient_step_idx']
+            start_batch_idx = training_state['batch_idx']
+
+            # Load model weights from checkpoint using from_pretrained (handles safetensors format)
+            vla_checkpoint = AutoModelForVision2Seq.from_pretrained(
+                checkpoint_dir,
+                torch_dtype=torch.bfloat16,
+                quantization_config=quantization_config,
+                low_cpu_mem_usage=True,
+                trust_remote_code=True,
+            )
+
+            # Replace the model in the DDP wrapper
+            vla.module = vla_checkpoint
+
+            if distributed_state.is_main_process:
+                print(f"Resumed from step {start_gradient_step}, batch {start_batch_idx}")
+        else:
+            if distributed_state.is_main_process:
+                print("Warning: Could not load training state from checkpoint")
+    elif cfg.resume and cfg.resume_from_checkpoint is None:
+        raise ValueError("resume=True but resume_from_checkpoint is not specified!")
+
     # Load Fine-tuning Dataset
     batch_transform = RLDSBatchTransform(
         action_tokenizer,
@@ -430,10 +466,10 @@ def finetune(cfg: FinetuneConfig) -> None:
     hidden_state_dir.mkdir(parents=True, exist_ok=True)
 
     # Train!
-    with tqdm.tqdm(total=cfg.max_steps, initial=start_gradient_step, leave=False) as progress:
+    with tqdm.tqdm(total=cfg.max_steps, initial=start_gradient_step, leave=False, desc="Training") as progress:
         vla.train()
         optimizer.zero_grad()
-        
+
         for batch_idx, batch in enumerate(dataloader):
             # Skip batches if resuming from checkpoint
             if batch_idx < start_batch_idx:
