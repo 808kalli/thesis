@@ -412,6 +412,10 @@ def finetune(cfg: FinetuneConfig) -> None:
                 trust_remote_code=True,
             )
 
+            # Move model to GPU (from_pretrained loads to CPU by default with low_cpu_mem_usage=True)
+            if not cfg.use_quantization:
+                vla_checkpoint = vla_checkpoint.to(device_id)
+
             # Replace the model in the DDP wrapper
             vla.module = vla_checkpoint
 
