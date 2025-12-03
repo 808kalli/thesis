@@ -371,24 +371,11 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     teacher_dataset_file = h5py.File(str(cfg.teacher_dataset_h5_path), "r")
 
-    # Build lookup: global_index -> position in H5 file
+    # Load teacher global indices and hidden states into CPU RAM (one-time cost)
     teacher_global_indices = teacher_dataset_file["global_indices"][:]
-    global_idx_to_h5_position = {int(g_idx): pos for pos, g_idx in enumerate(teacher_global_indices)}
-
-    # Load all teacher hidden states into CPU RAM (one-time cost)
     teacher_hidden_states = torch.from_numpy(
         np.array(teacher_dataset_file["hidden_states"][:], dtype=np.float32)
     )
-
-    raise RuntimeError(
-        f"DEBUG teacher_global_indices:\n"
-        f"  Shape: {teacher_global_indices.shape}\n"
-        f"  First 10 elements: {teacher_global_indices[:10]}"
-    )
-
-    if distributed_state.is_main_process:
-        print(f"  - Loaded {len(teacher_global_indices)} teacher states")
-        print(f"  - Teacher hidden states shape: {teacher_hidden_states.shape}")
 
     # Note: No aggregation needed for teacher - already in precomputed dataset
     aggregation_enum = AggregationMethod(cfg.aggregation_method)
@@ -527,12 +514,8 @@ def finetune(cfg: FinetuneConfig) -> None:
             teacher_hidden_aggregated_list = []
 
             for global_idx in global_indices:
-                # Look up position using global_idx
-                global_idx_int = int(global_idx)
-                h5_position = global_idx_to_h5_position[global_idx_int]
-
-                # Fetch from preloaded tensor (O(1) operation, no disk I/O)
-                teacher_state = teacher_hidden_states[h5_position]
+                # Direct indexing since global_idx is sequential (0, 1, 2, ...)
+                teacher_state = teacher_hidden_states[int(global_idx)]
                 teacher_hidden_aggregated_list.append(teacher_state)
 
             teacher_hidden_aggregated = torch.stack(teacher_hidden_aggregated_list).to(device_id)
