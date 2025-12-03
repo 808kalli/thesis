@@ -490,10 +490,6 @@ def finetune(cfg: FinetuneConfig) -> None:
         optimizer.zero_grad()
 
         for batch_idx, batch in enumerate(dataloader):
-            # Skip batches if resuming from checkpoint
-            if batch_idx < start_batch_idx:
-                continue
-
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output: CausalLMOutputWithPast = vla(
                     input_ids=batch["input_ids"].to(device_id),
