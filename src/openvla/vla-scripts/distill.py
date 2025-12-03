@@ -149,7 +149,6 @@ def save_checkpoint(
         # Save training state
         training_state = {
             'gradient_step_idx': gradient_step_idx,
-            'batch_idx': batch_idx,
             'optimizer_state_dict': optimizer.state_dict(),
             'rng_state': torch.get_rng_state(),
             'cuda_rng_state': [state.cpu() for state in torch.cuda.get_rng_state_all()],  # Move to CPU
@@ -230,7 +229,7 @@ def load_checkpoint(adapter_dir, optimizer, device_id, distributed_state, sequen
             print("✓ Loaded distillation_loss_fn weights")
 
     if distributed_state.is_main_process:
-        print(f"Resumed from gradient step {training_state['gradient_step_idx']}, batch {training_state['batch_idx']}")
+        print(f"Resumed from gradient step {training_state['gradient_step_idx']}")
 
     return training_state
 
@@ -332,7 +331,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             adapter_config_path = adapter_dir / "adapter_config.json"
 
             if adapter_config_path.exists():
-                vla = PeftModel.from_pretrained(vla.base_model.model, adapter_dir)
+                vla = PeftModel.from_pretrained(vla, adapter_dir)
                 if distributed_state.is_main_process:
                     print(f"✓ Loaded LoRA adapter weights from {adapter_dir}")
             else:
@@ -424,7 +423,6 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Initialize training state tracking
     start_gradient_step = 0
-    start_batch_idx = 0
 
     # Load checkpoint if resuming training
     if cfg.resume:
@@ -434,10 +432,9 @@ def finetune(cfg: FinetuneConfig) -> None:
         )
         if training_state is not None:
             start_gradient_step = training_state['gradient_step_idx']
-            start_batch_idx = training_state['batch_idx']
 
             if distributed_state.is_main_process:
-                print(f"Resumed from step {start_gradient_step}, batch {start_batch_idx}")
+                print(f"Resumed from step {start_gradient_step}")
         else:
             if distributed_state.is_main_process:
                 print("Warning: Could not load training state from checkpoint")
