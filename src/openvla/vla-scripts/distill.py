@@ -366,14 +366,29 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Load precomputed teacher dataset (already aggregated and aligned)
     import h5py
+    if distributed_state.is_main_process:
+        print(f"Loading teacher hidden states into CPU RAM...")
+
     teacher_dataset_file = h5py.File(str(cfg.teacher_dataset_h5_path), "r")
 
     # Build lookup: global_index -> position in H5 file
     teacher_global_indices = teacher_dataset_file["global_indices"][:]
     global_idx_to_h5_position = {int(g_idx): pos for pos, g_idx in enumerate(teacher_global_indices)}
 
+    # Load all teacher hidden states into CPU RAM (one-time cost)
+    teacher_hidden_states = torch.from_numpy(
+        np.array(teacher_dataset_file["hidden_states"][:], dtype=np.float32)
+    )
+
+    raise RuntimeError(
+        f"DEBUG teacher_global_indices:\n"
+        f"  Shape: {teacher_global_indices.shape}\n"
+        f"  First 10 elements: {teacher_global_indices[:10]}"
+    )
+
     if distributed_state.is_main_process:
         print(f"  - Loaded {len(teacher_global_indices)} teacher states")
+        print(f"  - Teacher hidden states shape: {teacher_hidden_states.shape}")
 
     # Note: No aggregation needed for teacher - already in precomputed dataset
     aggregation_enum = AggregationMethod(cfg.aggregation_method)
@@ -508,18 +523,16 @@ def finetune(cfg: FinetuneConfig) -> None:
             # Get global indices from batch (required for proper teacher state alignment)
             global_indices = batch["global_indices"].cpu().numpy()
 
-            # Collect teacher states for this batch using global indices
+            # Collect teacher states for this batch using global indices (from preloaded CPU RAM)
             teacher_hidden_aggregated_list = []
 
             for global_idx in global_indices:
-                # Look up position in H5 file using global_idx
+                # Look up position using global_idx
                 global_idx_int = int(global_idx)
                 h5_position = global_idx_to_h5_position[global_idx_int]
 
-                # Fetch from H5 using the position
-                teacher_state = torch.from_numpy(
-                    np.array(teacher_dataset_file["hidden_states"][h5_position], dtype=np.float32)
-                )
+                # Fetch from preloaded tensor (O(1) operation, no disk I/O)
+                teacher_state = teacher_hidden_states[h5_position]
                 teacher_hidden_aggregated_list.append(teacher_state)
 
             teacher_hidden_aggregated = torch.stack(teacher_hidden_aggregated_list).to(device_id)
