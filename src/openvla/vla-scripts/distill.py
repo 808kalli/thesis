@@ -20,7 +20,7 @@ Run with:
                                     ...
     - [Resume Training]: torchrun --standalone --nnodes 1 --nproc-per-node $K vla-scripts/distill.py \
                             --resume True \
-                            --resume_from_checkpoint <PATH/TO/CHECKPOINT/DIR>
+                            --adapter_tmp_dir <PATH/TO/ADAPTER/DIR>
 """
 
 import os
@@ -101,7 +101,6 @@ class FinetuneConfig:
     distill_weight: float = 0.1                                     # Weight of distillation loss in total loss
     distill_loss_type: str = "kl_divergence"                        # Type of distillation loss: "kl_divergence" or "infonce"
     aggregation_method: str = "mean"                                # How to aggregate sequence: "last" or "mean"
-    frame_alignment_mode: str = "interpolated"                   # Frame alignment: "supervised_only" or "interpolated"
     distill_temperature_student: float = 1.0                        # Temperature for student similarity matrix softmax (only used if apply_softmax=True and loss_type=kl_divergence)
     distill_temperature_teacher: float = 1.0                        # Temperature for teacher similarity matrix softmax (only used if apply_softmax=True and loss_type=kl_divergence)
     distill_temperature: float = 0.1                                # Temperature for InfoNCE loss (only used if loss_type=infonce)
@@ -119,7 +118,6 @@ class FinetuneConfig:
 
     # Resume Training Parameters
     resume: bool = False                                            # Whether to resume training from a checkpoint
-    resume_from_checkpoint: Optional[Path] = None                   # Path to checkpoint directory to resume from
 
     # fmt: on
 
@@ -148,10 +146,6 @@ def save_checkpoint(
         # Save dataset statistics
         save_dataset_statistics(vla_dataset.dataset_statistics, checkpoint_dir)
 
-        # If LoRA, save adapter weights to temporary directory
-        save_dir = adapter_dir if cfg.use_lora else checkpoint_dir
-        vla.module.save_pretrained(save_dir)
-
         # Save training state
         training_state = {
             'gradient_step_idx': gradient_step_idx,
@@ -168,19 +162,26 @@ def save_checkpoint(
             if distillation_loss_fn is not None:
                 training_state['distillation_loss_fn'] = distillation_loss_fn.state_dict()
 
-        torch.save(training_state, checkpoint_dir / "training_state.pt")
+        # If LoRA, save adapter weights and training state to adapter_dir (for resumption)
+        if cfg.use_lora:
+            os.makedirs(adapter_dir, exist_ok=True)
+            vla.module.save_pretrained(adapter_dir)
+            torch.save(training_state, adapter_dir / "training_state.pt")
+        else:
+            vla.module.save_pretrained(checkpoint_dir)
+            torch.save(training_state, checkpoint_dir / "training_state.pt")
 
     # Wait for main process to finish saving
     dist.barrier()
 
-    # Merge LoRA weights into model backbone if using LoRA
+    # Merge LoRA weights into model backbone if using LoRA (for inference)
     if cfg.use_lora:
         base_vla = AutoModelForVision2Seq.from_pretrained(
             cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
         )
         merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
         merged_vla = merged_vla.merge_and_unload()
-        
+
         if distributed_state.is_main_process:
             merged_vla.save_pretrained(checkpoint_dir)
             print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {checkpoint_dir}")
@@ -189,9 +190,9 @@ def save_checkpoint(
     dist.barrier()
 
 
-def load_checkpoint(checkpoint_dir, optimizer, device_id, distributed_state, sequence_aggregation_student=None, distillation_loss_fn=None):
-    """Load complete training state for resumption."""
-    training_state_path = checkpoint_dir / "training_state.pt"
+def load_checkpoint(adapter_dir, optimizer, device_id, distributed_state, sequence_aggregation_student=None, distillation_loss_fn=None):
+    """Load complete training state for resumption from adapter_dir."""
+    training_state_path = adapter_dir / "training_state.pt"
 
     if not training_state_path.exists():
         if distributed_state.is_main_process:
@@ -279,7 +280,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             resume=None,
         )
 
-    # Determine checkpoint directory for resumption
+    # Determine checkpoint directory for saving
     checkpoint_dir = run_dir
 
     # Quantization Config =>> only if LoRA fine-tuning
@@ -297,17 +298,10 @@ def finetune(cfg: FinetuneConfig) -> None:
     AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
     # Load OpenVLA Processor and Model using HF AutoClasses
-    # Determine model path: use checkpoint if resuming, otherwise use original model path
-    if cfg.resume and cfg.resume_from_checkpoint is not None:
-        model_path = cfg.resume_from_checkpoint
-        if distributed_state.is_main_process:
-            print(f"Resuming from checkpoint: {model_path}")
-    else:
-        model_path = cfg.vla_path
-
-    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    # Always load from base model, then optionally load LoRA weights if resuming
+    processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
     vla = AutoModelForVision2Seq.from_pretrained(
-        model_path,
+        cfg.vla_path,
         torch_dtype=torch.bfloat16,
         quantization_config=quantization_config,
         low_cpu_mem_usage=True,
@@ -331,6 +325,19 @@ def finetune(cfg: FinetuneConfig) -> None:
         )
         vla = get_peft_model(vla, lora_config)
         vla.print_trainable_parameters()
+
+        # Load previously trained LoRA weights if resuming
+        if cfg.resume:
+            # adapter_dir is computed at the beginning and contains the LoRA weights
+            adapter_config_path = adapter_dir / "adapter_config.json"
+
+            if adapter_config_path.exists():
+                vla = PeftModel.from_pretrained(vla.base_model.model, adapter_dir)
+                if distributed_state.is_main_process:
+                    print(f"✓ Loaded LoRA adapter weights from {adapter_dir}")
+            else:
+                if distributed_state.is_main_process:
+                    print(f"Warning: adapter_config.json not found at {adapter_dir}, starting with fresh LoRA weights")
 
     # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
     vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
@@ -420,13 +427,9 @@ def finetune(cfg: FinetuneConfig) -> None:
     start_batch_idx = 0
 
     # Load checkpoint if resuming training
-    if cfg.resume and cfg.resume_from_checkpoint is not None:
-        checkpoint_dir = Path(cfg.resume_from_checkpoint)
-        if not checkpoint_dir.exists():
-            raise ValueError(f"Checkpoint directory not found: {checkpoint_dir}")
-
+    if cfg.resume:
         training_state = load_checkpoint(
-            checkpoint_dir, optimizer, device_id, distributed_state,
+            adapter_dir, optimizer, device_id, distributed_state,
             sequence_aggregation_student, distillation_loss_fn
         )
         if training_state is not None:
@@ -438,8 +441,6 @@ def finetune(cfg: FinetuneConfig) -> None:
         else:
             if distributed_state.is_main_process:
                 print("Warning: Could not load training state from checkpoint")
-    elif cfg.resume and cfg.resume_from_checkpoint is None:
-        raise ValueError("resume=True but resume_from_checkpoint is not specified!")
 
     # Load Fine-tuning Dataset
     batch_transform = RLDSBatchTransform(
