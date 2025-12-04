@@ -109,7 +109,7 @@ class FinetuneConfig:
     distill_projection_dim: Optional[int] = None                    # Optional projection dimension for hidden states
     distill_use_layer_norm: bool = False                            # Whether to use LayerNorm for per-sample stabilization
     distill_apply_softmax: bool = True                              # Whether to apply softmax before computing KL divergence (only for kl_divergence)
-    distill_gradient_clip_norm: float = 1.0                         # Gradient clipping norm (prevents exploding gradients)
+    distill_gradient_clip_norm: Optional[float] = None              # Gradient clipping norm (prevents exploding gradients)
 
     # Tracking Parameters
     wandb_project: str = "openvla"                                  # Name of W&B project to log to (use default!)
@@ -606,7 +606,8 @@ def finetune(cfg: FinetuneConfig) -> None:
             # Optimizer Step
             if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
                 # Clip gradients to prevent exploding gradients (especially important with distill_normalize=False)
-                torch.nn.utils.clip_grad_norm_(trainable_params, cfg.distill_gradient_clip_norm)
+                if cfg.distill_gradient_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(trainable_params, cfg.distill_gradient_clip_norm)
                 optimizer.step()
                 optimizer.zero_grad()
                 progress.update()
