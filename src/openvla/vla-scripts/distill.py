@@ -101,6 +101,51 @@ def setup_logging(log_dir: Path, is_main_process: bool = True):
     return logger
 
 
+def compute_distill_weight_with_decay(
+    step: int,
+    initial_weight: float,
+    decay_enabled: bool,
+    decay_start_step: int,
+    decay_end_step: int,
+    decay_final_ratio: float,
+) -> float:
+    """
+    Compute distillation weight with optional sigmoid decay.
+
+    Args:
+        step: Current training step
+        initial_weight: Initial distillation weight
+        decay_enabled: Whether decay is enabled
+        decay_start_step: Step at which decay starts
+        decay_end_step: Step at which decay reaches final value
+        decay_final_ratio: Final weight as ratio of initial (e.g., 0.1 for 10x reduction)
+
+    Returns:
+        Current distillation weight
+    """
+    if not decay_enabled or step < decay_start_step:
+        return initial_weight
+
+    if step >= decay_end_step:
+        return initial_weight * decay_final_ratio
+
+    # Compute sigmoid decay between start and end steps
+    # Map step to range [0, 1] between start and end
+    progress = (step - decay_start_step) / (decay_end_step - decay_start_step)
+
+    # Use sigmoid function: 1 / (1 + exp(k * (x - 0.5)))
+    # k controls steepness; higher k = steeper transition
+    # For smooth decay over the range, k=10 works well
+    k = 10.0
+    sigmoid_value = 1.0 / (1.0 + np.exp(k * (progress - 0.5)))
+
+    # Map sigmoid from [1, 0] to [initial_weight, final_weight]
+    final_weight = initial_weight * decay_final_ratio
+    current_weight = final_weight + (initial_weight - final_weight) * sigmoid_value
+
+    return current_weight
+
+
 def log_trainable_parameters(vla, sequence_aggregation_student=None, distillation_loss_fn=None):
     """
     Log detailed breakdown of trainable parameters for LoRA, distillation modules, and total.
@@ -207,6 +252,12 @@ class FinetuneConfig:
     distill_use_layer_norm: bool = False                            # Whether to use LayerNorm for per-sample stabilization
     distill_apply_softmax: bool = True                              # Whether to apply softmax before computing KL divergence (only for kl_divergence)
     distill_gradient_clip_norm: Optional[float] = None              # Gradient clipping norm (prevents exploding gradients)
+
+    # Distillation Weight Decay Parameters
+    distill_weight_decay_enabled: bool = False                      # Whether to apply sigmoid decay to distillation weight
+    distill_weight_decay_start_step: int = 10_000                   # Step at which to start decaying distillation weight
+    distill_weight_decay_end_step: int = 12_000                     # Step at which decay should reach final value
+    distill_weight_decay_final_ratio: float = 0.1                   # Final weight as ratio of initial weight (0.1 = 10x reduction)
 
     # Tracking Parameters
     wandb_project: str = "openvla"                                  # Name of W&B project to log to (use default!)
@@ -464,6 +515,12 @@ def finetune(cfg: FinetuneConfig) -> None:
         logger.info(f"  - Normalize: {cfg.distill_normalize}")
         logger.info(f"  - Use LayerNorm: {cfg.distill_use_layer_norm}")
         logger.info(f"  - Gradient Clip Norm: {cfg.distill_gradient_clip_norm}")
+        logger.info(f"  - Weight Decay Enabled: {cfg.distill_weight_decay_enabled}")
+        if cfg.distill_weight_decay_enabled:
+            logger.info(f"    * Decay Start Step: {cfg.distill_weight_decay_start_step}")
+            logger.info(f"    * Decay End Step: {cfg.distill_weight_decay_end_step}")
+            logger.info(f"    * Final Ratio: {cfg.distill_weight_decay_final_ratio}")
+            logger.info(f"    * Final Weight: {cfg.distill_weight * cfg.distill_weight_decay_final_ratio:.6f}")
 
     # Load precomputed teacher dataset (already aggregated and aligned)
     import h5py
@@ -647,8 +704,18 @@ def finetune(cfg: FinetuneConfig) -> None:
                     teacher_hidden_aggregated,
                 )
 
+            # Compute current distillation weight with optional decay
+            current_distill_weight = compute_distill_weight_with_decay(
+                step=gradient_step_idx,
+                initial_weight=cfg.distill_weight,
+                decay_enabled=cfg.distill_weight_decay_enabled,
+                decay_start_step=cfg.distill_weight_decay_start_step,
+                decay_end_step=cfg.distill_weight_decay_end_step,
+                decay_final_ratio=cfg.distill_weight_decay_final_ratio,
+            )
+
             # Combine losses
-            total_loss = action_loss + cfg.distill_weight * distill_loss
+            total_loss = action_loss + current_distill_weight * distill_loss
 
             # Normalize loss to account for gradient accumulation
             normalized_loss = total_loss / cfg.grad_accumulation_steps
@@ -701,8 +768,20 @@ def finetune(cfg: FinetuneConfig) -> None:
             # Add distillation metrics
             if len(recent_distill_losses) > 0:
                 smoothened_distill_loss = sum(recent_distill_losses) / len(recent_distill_losses)
+
+                # Compute current distillation weight for logging
+                current_weight_for_logging = compute_distill_weight_with_decay(
+                    step=gradient_step_idx,
+                    initial_weight=cfg.distill_weight,
+                    decay_enabled=cfg.distill_weight_decay_enabled,
+                    decay_start_step=cfg.distill_weight_decay_start_step,
+                    decay_end_step=cfg.distill_weight_decay_end_step,
+                    decay_final_ratio=cfg.distill_weight_decay_final_ratio,
+                )
+
                 log_dict["distill_loss"] = smoothened_distill_loss
-                log_dict["total_loss"] = smoothened_loss + cfg.distill_weight * smoothened_distill_loss
+                log_dict["distill_weight"] = current_weight_for_logging
+                log_dict["total_loss"] = smoothened_loss + current_weight_for_logging * smoothened_distill_loss
 
             # Push Metrics to W&B (every 10 gradient steps)
             if distributed_state.is_main_process and gradient_step_idx % 10 == 0:
