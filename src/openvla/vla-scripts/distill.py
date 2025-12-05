@@ -651,6 +651,9 @@ def finetune(cfg: FinetuneConfig) -> None:
         optimizer.zero_grad()
 
         for batch_idx, batch in enumerate(dataloader):
+            # Compute gradient step index (needed for decay schedule)
+            gradient_step_idx = batch_idx // cfg.grad_accumulation_steps
+
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output: CausalLMOutputWithPast = vla(
                     input_ids=batch["input_ids"].to(device_id),
@@ -747,9 +750,6 @@ def finetune(cfg: FinetuneConfig) -> None:
             recent_action_accuracies.append(action_accuracy.item())
             recent_l1_losses.append(action_l1_loss.item())
             recent_distill_losses.append(distill_loss.item() if isinstance(distill_loss, torch.Tensor) else distill_loss)
-
-            # Compute gradient step index
-            gradient_step_idx = batch_idx // cfg.grad_accumulation_steps
 
             # Compute smoothened train metrics
             #   =>> Equal to current step metrics when not using gradient accumulation
