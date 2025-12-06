@@ -702,7 +702,8 @@ PYTHONPATH=/home/elias/Thesis/src/openvla:$PYTHONPATH python experiments/robot/l
   --load_in_8bit True \
   --use_wandb True \
   --wandb_project openvla-distill-eval \
-  --wandb_entity eliaskallioras-national-technical-university-of-athens
+  --wandb_entity eliaskallioras-national-technical-university-of-athens \
+  --is_baseline False
 ```
 
 ### Parameters

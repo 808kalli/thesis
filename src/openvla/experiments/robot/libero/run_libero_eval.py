@@ -373,6 +373,7 @@ class GenerateConfig:
     wandb_entity: str = "YOUR_WANDB_ENTITY"          # Name of entity to log under
 
     seed: int = 7                                    # Random Seed (for reproducibility)
+    is_baseline: bool = False                        # Whether this is a vanilla baseline model (no distillation)
 
     # fmt: on
 
@@ -417,20 +418,23 @@ def eval_libero(cfg: GenerateConfig) -> None:
     if cfg.model_family == "openvla":
         processor = get_processor(cfg)
 
-    # Load training config from checkpoint directory if it exists
+    # Load training config from checkpoint directory if it exists (skip for baseline)
     training_config = {}
-    checkpoint_path = Path(cfg.pretrained_checkpoint)
-    training_config_path = checkpoint_path / "training_config.yaml"
-    if training_config_path.exists():
-        import yaml
-        with open(training_config_path, 'r') as f:
-            training_config = yaml.safe_load(f)
-        print(f"Loaded training config from {training_config_path}")
-    else:
-        print(f"Warning: No training config found at {training_config_path}")
+    if not cfg.is_baseline:
+        checkpoint_path = Path(cfg.pretrained_checkpoint)
+        training_config_path = checkpoint_path / "training_config.yaml"
+        if training_config_path.exists():
+            import yaml
+            with open(training_config_path, 'r') as f:
+                training_config = yaml.safe_load(f)
+            print(f"Loaded training config from {training_config_path}")
+        else:
+            print(f"Warning: No training config found at {training_config_path}")
 
     # Create descriptive name from training config
-    if training_config:
+    if cfg.is_baseline:
+        config_name = "finetune_full"
+    elif training_config:
         distill_config = training_config.get('distillation', {})
 
         loss_type = distill_config.get('distill_loss_type', 'unknown')
