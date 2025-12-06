@@ -25,7 +25,6 @@ Run with:
 
 import os
 import sys
-import logging
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,38 +66,7 @@ from distillation_utils import (
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
-def setup_logging(log_dir: Path, is_main_process: bool = True):
-    """Setup logging to file and console."""
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "train.log"
-
-    # Create logger
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-
-    # Remove existing handlers to avoid duplicates
-    logger.handlers.clear()
-
-    # Only setup logging on main process
-    if is_main_process:
-        # File handler
-        file_handler = logging.FileHandler(log_file, mode='a')
-        file_handler.setLevel(logging.INFO)
-        file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-        file_handler.setFormatter(file_formatter)
-        logger.addHandler(file_handler)
-
-        # Console handler
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(logging.INFO)
-        console_formatter = logging.Formatter('%(message)s')
-        console_handler.setFormatter(console_formatter)
-        logger.addHandler(console_handler)
-    else:
-        # For non-main processes, disable all logging
-        logger.addHandler(logging.NullHandler())
-
-    return logger
+# Logging removed - using print statements instead
 
 
 def compute_distill_weight_with_decay(
@@ -155,7 +123,6 @@ def log_trainable_parameters(vla, sequence_aggregation_student=None, distillatio
         sequence_aggregation_student: Optional student aggregation MLP
         distillation_loss_fn: Optional distillation loss module
     """
-    logger = logging.getLogger()
 
     # Count LoRA parameters
     lora_trainable_params = 0
@@ -187,24 +154,24 @@ def log_trainable_parameters(vla, sequence_aggregation_student=None, distillatio
     trainable_percent = 100 * total_trainable / total_all if total_all > 0 else 0
 
     # Log detailed breakdown
-    logger.info("=" * 80)
-    logger.info("TRAINABLE PARAMETERS BREAKDOWN")
-    logger.info("=" * 80)
-    logger.info(f"LoRA Model:")
-    logger.info(f"  - Trainable params: {lora_trainable_params:,}")
-    logger.info(f"  - All params: {lora_all_params:,}")
-    logger.info(f"  - Trainable %: {100 * lora_trainable_params / lora_all_params:.4f}%")
-    logger.info("")
-    logger.info(f"Distillation Modules (MLP + Loss):")
-    logger.info(f"  - Trainable params: {distill_trainable_params:,}")
-    logger.info(f"  - All params: {distill_all_params:,}")
-    logger.info(f"  - Trainable %: {100.0 if distill_all_params > 0 else 0.0:.4f}%")
-    logger.info("")
-    logger.info(f"TOTAL:")
-    logger.info(f"  - Trainable params: {total_trainable:,}")
-    logger.info(f"  - All params: {total_all:,}")
-    logger.info(f"  - Trainable %: {trainable_percent:.4f}%")
-    logger.info("=" * 80)
+    print("=" * 80)
+    print("TRAINABLE PARAMETERS BREAKDOWN")
+    print("=" * 80)
+    print(f"LoRA Model:")
+    print(f"  - Trainable params: {lora_trainable_params:,}")
+    print(f"  - All params: {lora_all_params:,}")
+    print(f"  - Trainable %: {100 * lora_trainable_params / lora_all_params:.4f}%")
+    print("")
+    print(f"Distillation Modules (MLP + Loss):")
+    print(f"  - Trainable params: {distill_trainable_params:,}")
+    print(f"  - All params: {distill_all_params:,}")
+    print(f"  - Trainable %: {100.0 if distill_all_params > 0 else 0.0:.4f}%")
+    print("")
+    print(f"TOTAL:")
+    print(f"  - Trainable params: {total_trainable:,}")
+    print(f"  - All params: {total_all:,}")
+    print(f"  - Trainable %: {trainable_percent:.4f}%")
+    print("=" * 80)
 
 
 @dataclass
@@ -252,6 +219,7 @@ class FinetuneConfig:
     distill_use_layer_norm: bool = False                            # Whether to use LayerNorm for per-sample stabilization
     distill_apply_softmax: bool = True                              # Whether to apply softmax before computing KL divergence (only for kl_divergence)
     distill_gradient_clip_norm: Optional[float] = None              # Gradient clipping norm (prevents exploding gradients)
+    bottleneck_dim: int = 2048                                      # MLP bottleneck dimension for student projection
 
     # Distillation Weight Decay Parameters
     distill_weight_decay_enabled: bool = False                      # Whether to apply sigmoid decay to distillation weight
@@ -285,9 +253,8 @@ def save_checkpoint(
     distillation_loss_fn=None,
 ):
     """Save complete training state for resumption."""
-    logger = logging.getLogger()
     if distributed_state.is_main_process:
-        logger.info(f"Saving Model Checkpoint for Step {gradient_step_idx}")
+        print(f"Saving Model Checkpoint for Step {gradient_step_idx}")
 
         # Save processor
         processor.save_pretrained(checkpoint_dir)
@@ -309,6 +276,17 @@ def save_checkpoint(
                 training_state['sequence_aggregation_student'] = sequence_aggregation_student.state_dict()
             if distillation_loss_fn is not None:
                 training_state['distillation_loss_fn'] = distillation_loss_fn.state_dict()
+
+        # Save training config as YAML in checkpoint_dir (for evaluation logging)
+        import yaml
+        from dataclasses import asdict
+        config_dict = asdict(cfg)
+        # Convert Path objects to strings for YAML serialization
+        for key, value in config_dict.items():
+            if isinstance(value, Path):
+                config_dict[key] = str(value)
+        with open(checkpoint_dir / "training_config.yaml", "w") as f:
+            yaml.dump(config_dict, f, default_flow_style=False, indent=2)
 
         # If LoRA, save adapter weights and training state to adapter_dir (for resumption)
         if cfg.use_lora:
@@ -332,7 +310,7 @@ def save_checkpoint(
 
         if distributed_state.is_main_process:
             merged_vla.save_pretrained(checkpoint_dir)
-            logger.info(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {checkpoint_dir}")
+            print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {checkpoint_dir}")
 
     # Block on main process checkpointing
     dist.barrier()
@@ -340,16 +318,15 @@ def save_checkpoint(
 
 def load_checkpoint(adapter_dir, optimizer, device_id, distributed_state, sequence_aggregation_student=None, distillation_loss_fn=None):
     """Load complete training state for resumption from adapter_dir."""
-    logger = logging.getLogger()
     training_state_path = adapter_dir / "training_state.pt"
 
     if not training_state_path.exists():
         if distributed_state.is_main_process:
-            logger.info(f"No training state found at {training_state_path}")
+            print(f"No training state found at {training_state_path}")
         return None
 
     if distributed_state.is_main_process:
-        logger.info(f"Loading training state from {training_state_path}")
+        print(f"Loading training state from {training_state_path}")
 
     training_state = torch.load(training_state_path, map_location='cpu')  # Load to CPU first
 
@@ -371,15 +348,15 @@ def load_checkpoint(adapter_dir, optimizer, device_id, distributed_state, sequen
     if sequence_aggregation_student is not None and 'sequence_aggregation_student' in training_state:
         sequence_aggregation_student.load_state_dict(training_state['sequence_aggregation_student'])
         if distributed_state.is_main_process:
-            logger.info("✓ Loaded sequence_aggregation_student weights")
+            print("✓ Loaded sequence_aggregation_student weights")
 
     if distillation_loss_fn is not None and 'distillation_loss_fn' in training_state:
         distillation_loss_fn.load_state_dict(training_state['distillation_loss_fn'])
         if distributed_state.is_main_process:
-            logger.info("✓ Loaded distillation_loss_fn weights")
+            print("✓ Loaded distillation_loss_fn weights")
 
     if distributed_state.is_main_process:
-        logger.info(f"Resumed from gradient step {training_state['gradient_step_idx']}")
+        print(f"Resumed from gradient step {training_state['gradient_step_idx']}")
 
     return training_state
 
@@ -397,12 +374,9 @@ def finetune(cfg: FinetuneConfig) -> None:
     run_dir, adapter_dir = cfg.run_root_dir / exp_id, cfg.adapter_tmp_dir / exp_id
     os.makedirs(run_dir, exist_ok=True)
 
-    # Setup logging
-    logger = setup_logging(run_dir, distributed_state.is_main_process)
-
-    logger.info("\n" + "="*70)
-    logger.info("\033[91m" + " "*15 + "Do or do not; there is no try." + "\033[0m")
-    logger.info("="*70 + "\n")
+    print("\n" + "="*70)
+    print("\033[91m" + " "*15 + "Do or do not; there is no try." + "\033[0m")
+    print("="*70 + "\n")
 
     # Configure Unique Experiment ID & Log Directory
     # exp_id = (
@@ -485,10 +459,10 @@ def finetune(cfg: FinetuneConfig) -> None:
             if adapter_config_path.exists():
                 vla = PeftModel.from_pretrained(vla, adapter_dir)
                 if distributed_state.is_main_process:
-                    logger.info(f"✓ Loaded LoRA adapter weights from {adapter_dir}")
+                    print(f"✓ Loaded LoRA adapter weights from {adapter_dir}")
             else:
                 if distributed_state.is_main_process:
-                    logger.info(f"Warning: adapter_config.json not found at {adapter_dir}, starting with fresh LoRA weights")
+                    print(f"Warning: adapter_config.json not found at {adapter_dir}, starting with fresh LoRA weights")
 
     # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
     vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
@@ -501,31 +475,31 @@ def finetune(cfg: FinetuneConfig) -> None:
         raise ValueError("use_distillation=True but teacher_dataset_h5_path is not specified!")
 
     if distributed_state.is_main_process:
-        logger.info(f"Initializing knowledge distillation...")
-        logger.info(f"  - Teacher Dataset H5: {cfg.teacher_dataset_h5_path}")
-        logger.info(f"  - Loss Type: {cfg.distill_loss_type}")
-        logger.info(f"  - Distill Weight: {cfg.distill_weight}")
+        print(f"Initializing knowledge distillation...")
+        print(f"  - Teacher Dataset H5: {cfg.teacher_dataset_h5_path}")
+        print(f"  - Loss Type: {cfg.distill_loss_type}")
+        print(f"  - Distill Weight: {cfg.distill_weight}")
         if cfg.distill_loss_type == "kl_divergence":
-            logger.info(f"  - Apply Softmax: {cfg.distill_apply_softmax}")
-            logger.info(f"  - Temperature (Student): {cfg.distill_temperature_student}")
-            logger.info(f"  - Temperature (Teacher): {cfg.distill_temperature_teacher}")
-            logger.info(f"  - Mask Diagonal: {cfg.distill_mask_diagonal}")
+            print(f"  - Apply Softmax: {cfg.distill_apply_softmax}")
+            print(f"  - Temperature (Student): {cfg.distill_temperature_student}")
+            print(f"  - Temperature (Teacher): {cfg.distill_temperature_teacher}")
+            print(f"  - Mask Diagonal: {cfg.distill_mask_diagonal}")
         elif cfg.distill_loss_type == "infonce":
-            logger.info(f"  - Temperature (InfoNCE): {cfg.distill_temperature}")
-        logger.info(f"  - Normalize: {cfg.distill_normalize}")
-        logger.info(f"  - Use LayerNorm: {cfg.distill_use_layer_norm}")
-        logger.info(f"  - Gradient Clip Norm: {cfg.distill_gradient_clip_norm}")
-        logger.info(f"  - Weight Decay Enabled: {cfg.distill_weight_decay_enabled}")
+            print(f"  - Temperature (InfoNCE): {cfg.distill_temperature}")
+        print(f"  - Normalize: {cfg.distill_normalize}")
+        print(f"  - Use LayerNorm: {cfg.distill_use_layer_norm}")
+        print(f"  - Gradient Clip Norm: {cfg.distill_gradient_clip_norm}")
+        print(f"  - Weight Decay Enabled: {cfg.distill_weight_decay_enabled}")
         if cfg.distill_weight_decay_enabled:
-            logger.info(f"    * Decay Start Step: {cfg.distill_weight_decay_start_step}")
-            logger.info(f"    * Decay End Step: {cfg.distill_weight_decay_end_step}")
-            logger.info(f"    * Final Ratio: {cfg.distill_weight_decay_final_ratio}")
-            logger.info(f"    * Final Weight: {cfg.distill_weight * cfg.distill_weight_decay_final_ratio:.6f}")
+            print(f"    * Decay Start Step: {cfg.distill_weight_decay_start_step}")
+            print(f"    * Decay End Step: {cfg.distill_weight_decay_end_step}")
+            print(f"    * Final Ratio: {cfg.distill_weight_decay_final_ratio}")
+            print(f"    * Final Weight: {cfg.distill_weight * cfg.distill_weight_decay_final_ratio:.6f}")
 
     # Load precomputed teacher dataset (already aggregated and aligned)
     import h5py
     if distributed_state.is_main_process:
-        logger.info(f"Loading teacher hidden states into CPU RAM...")
+        print(f"Loading teacher hidden states into CPU RAM...")
 
     teacher_dataset_file = h5py.File(str(cfg.teacher_dataset_h5_path), "r")
 
@@ -542,7 +516,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Teacher states are ALREADY aggregated and aligned in precomputed dataset
     sequence_aggregation_student = StudentSequenceProjectionMLP(
         input_dim=4096,
-        bottleneck_dim=2048,
+        bottleneck_dim=cfg.bottleneck_dim,
         aggregation_method=aggregation_enum,
     ).to(device_id)
 
@@ -598,10 +572,10 @@ def finetune(cfg: FinetuneConfig) -> None:
             start_gradient_step = training_state['gradient_step_idx']
 
             if distributed_state.is_main_process:
-                logger.info(f"Resumed from step {start_gradient_step}")
+                print(f"Resumed from step {start_gradient_step}")
         else:
             if distributed_state.is_main_process:
-                logger.info("Warning: Could not load training state from checkpoint")
+                print("Warning: Could not load training state from checkpoint")
 
     # Load Fine-tuning Dataset
     batch_transform = RLDSBatchTransform(
@@ -824,7 +798,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
             # Stop training when max_steps is reached
             if gradient_step_idx == cfg.max_steps:
-                logger.info(f"Max step {cfg.max_steps} reached! Stopping training...")
+                print(f"Max step {cfg.max_steps} reached! Stopping training...")
                 break
 
 
