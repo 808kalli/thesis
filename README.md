@@ -661,3 +661,119 @@ If something fails:
 5. Ensure dataset provides required metadata
 
 For detailed technical info, see `distillation_utils.py` docstrings.
+
+---
+
+## LIBERO Evaluation
+
+After training, evaluate your model on LIBERO benchmark tasks.
+
+### Prerequisites
+
+1. Install LIBERO:
+```bash
+git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
+cd LIBERO
+pip install -e .
+```
+
+2. Set environment variables:
+```bash
+export LIBERO_PATH=/home/elias/Thesis/LIBERO/libero/libero
+export LIBERO_CONFIG_PATH=/home/elias/Thesis/LIBERO/.libero
+```
+
+### Running Evaluation
+
+Navigate to the OpenVLA source directory and run:
+
+```bash
+cd /home/elias/Thesis/src/openvla
+
+export LIBERO_PATH=/home/elias/Thesis/LIBERO/libero/libero
+export LIBERO_CONFIG_PATH=/home/elias/Thesis/LIBERO/.libero
+PYTHONPATH=/home/elias/Thesis/src/openvla:$PYTHONPATH python experiments/robot/libero/run_libero_eval.py \
+  --model_family openvla \
+  --pretrained_checkpoint /home/elias/Thesis/checkpoints/distill_norm_0_temp_4.0_small \
+  --task_suite_name libero_spatial \
+  --center_crop True \
+  --num_trials_per_task 20 \
+  --seed 7 \
+  --load_in_8bit True \
+  --use_wandb True \
+  --wandb_project openvla-distill-eval \
+  --wandb_entity eliaskallioras-national-technical-university-of-athens
+```
+
+### Parameters
+
+| Parameter | Description | Options |
+|-----------|-------------|---------|
+| `--pretrained_checkpoint` | Path to trained model checkpoint | Directory containing model weights |
+| `--task_suite_name` | LIBERO task suite to evaluate on | `libero_spatial`, `libero_object`, `libero_goal`, `libero_10`, `libero_90` |
+| `--center_crop` | Use center crop (needed if trained with image aug) | `True`, `False` |
+| `--num_trials_per_task` | Number of rollouts per task | Default: 20 |
+| `--load_in_8bit` | Use 8-bit quantization for inference | `True`, `False` |
+| `--use_wandb` | Log results to Weights & Biases | `True`, `False` |
+| `--wandb_project` | W&B project name | Any string |
+| `--wandb_entity` | W&B entity name | Your W&B username/team |
+
+### What Gets Logged to W&B
+
+When `--use_wandb True`, the script automatically logs:
+
+1. **Training Configuration** (from `training_config.yaml` in checkpoint):
+   - Batch size, learning rate, LoRA rank
+   - Distillation parameters (loss type, temperature, weight, etc.)
+   - All hyperparameters used during training
+
+2. **Per-Task Performance**:
+   - `success_rate/<task_name>`: Success rate for each individual task
+   - `num_episodes/<task_name>`: Number of episodes run per task
+
+3. **Final Performance**:
+   - `success_rate/total`: Overall success rate across all tasks
+   - `num_episodes/total`: Total number of episodes
+
+### Example Output
+
+```
+Task suite: libero_spatial
+Loading training config from /path/to/checkpoint/training_config.yaml
+Logged training config to wandb
+
+Task: pick up the red cube
+Success: True
+# episodes completed so far: 1
+# successes: 1 (100.0%)
+
+...
+
+Current task success rate: 0.85
+Current total success rate: 0.72
+```
+
+### Comparing Different Training Configs
+
+Since training hyperparameters are automatically logged to W&B, you can easily compare:
+- Different distillation temperatures
+- Different loss types (InfoNCE vs KL-Divergence)
+- Different distillation weights
+- LoRA configurations
+
+Just run evaluation on multiple checkpoints and compare in W&B dashboard.
+
+### Troubleshooting
+
+**"LIBERO not found"**:
+```bash
+pip install git+https://github.com/Lifelong-Robot-Learning/LIBERO.git
+```
+
+**"No training config found"**:
+- Ensure your checkpoint was saved with the updated training script that saves `training_config.yaml`
+- Config will be missing for old checkpoints (evaluation still works, just won't log training params)
+
+**"Action un-norm key not found"**:
+- Model doesn't have normalization stats for the task suite
+- Retrain on the specific LIBERO suite or use a model pretrained on LIBERO data

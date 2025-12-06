@@ -426,6 +426,18 @@ def eval_libero(cfg: GenerateConfig) -> None:
     log_file = open(local_log_filepath, "w")
     print(f"Logging to local log file: {local_log_filepath}")
 
+    # Load training config from checkpoint directory if it exists
+    training_config = {}
+    checkpoint_path = Path(cfg.pretrained_checkpoint)
+    training_config_path = checkpoint_path / "training_config.yaml"
+    if training_config_path.exists():
+        import yaml
+        with open(training_config_path, 'r') as f:
+            training_config = yaml.safe_load(f)
+        print(f"Loaded training config from {training_config_path}")
+    else:
+        print(f"Warning: No training config found at {training_config_path}")
+
     # Initialize Weights & Biases logging as well
     if cfg.use_wandb:
         wandb.init(
@@ -433,6 +445,16 @@ def eval_libero(cfg: GenerateConfig) -> None:
             project=cfg.wandb_project,
             name=run_id,
         )
+
+        # Log training config parameters to wandb
+        if training_config:
+            wandb.config.update({
+                "training_config": training_config,
+                "checkpoint_path": str(cfg.pretrained_checkpoint),
+                "task_suite_name": cfg.task_suite_name,
+                "num_trials_per_task": cfg.num_trials_per_task,
+            })
+            print("Logged training config to wandb")
 
     # Initialize LIBERO task suite
     benchmark_dict = benchmark.get_benchmark_dict()
