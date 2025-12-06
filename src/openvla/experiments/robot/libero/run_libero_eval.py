@@ -417,15 +417,6 @@ def eval_libero(cfg: GenerateConfig) -> None:
     if cfg.model_family == "openvla":
         processor = get_processor(cfg)
 
-    # Initialize local logging
-    run_id = f"EVAL-{cfg.task_suite_name}-{cfg.model_family}-{DATE_TIME}"
-    if cfg.run_id_note is not None:
-        run_id += f"--{cfg.run_id_note}"
-    os.makedirs(cfg.local_log_dir, exist_ok=True)
-    local_log_filepath = os.path.join(cfg.local_log_dir, run_id + ".txt")
-    log_file = open(local_log_filepath, "w")
-    print(f"Logging to local log file: {local_log_filepath}")
-
     # Load training config from checkpoint directory if it exists
     training_config = {}
     checkpoint_path = Path(cfg.pretrained_checkpoint)
@@ -437,6 +428,32 @@ def eval_libero(cfg: GenerateConfig) -> None:
         print(f"Loaded training config from {training_config_path}")
     else:
         print(f"Warning: No training config found at {training_config_path}")
+
+    # Create descriptive name from training config
+    if training_config:
+        distill_config = training_config.get('distillation', {})
+
+        loss_type = distill_config.get('distill_loss_type', 'unknown')
+        temp = distill_config.get('distill_temperature', 0.0)
+        weight = distill_config.get('distill_weight', 0.0)
+
+        config_name = f"distill_{loss_type}_temp_{temp}_weight_{weight}_full"
+    else:
+        config_name = f"EVAL-{cfg.task_suite_name}-{DATE_TIME}"
+
+    # Initialize local logging with config-based name
+    log_dir = Path("/home/elias/Thesis/logs/openvla/real")
+    os.makedirs(log_dir, exist_ok=True)
+    local_log_filepath = log_dir / f"{config_name}.txt"
+    log_file = open(local_log_filepath, "w")
+    print(f"Logging to local log file: {local_log_filepath}")
+
+    # Create rollout directory with same name
+    rollout_dir = log_dir / config_name
+    os.makedirs(rollout_dir, exist_ok=True)
+    print(f"Saving rollouts to: {rollout_dir}")
+
+    run_id = config_name
 
     # Initialize Weights & Biases logging as well
     if cfg.use_wandb:
@@ -602,7 +619,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
 
             # Save a replay video of the episode
             save_rollout_video(
-                replay_images, total_episodes, success=done, task_description=task_description, log_file=log_file
+                replay_images, total_episodes, success=done, task_description=task_description,
+                log_file=log_file, rollout_dir=str(rollout_dir)
             )
 
             # Log current results
