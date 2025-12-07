@@ -694,11 +694,10 @@ export LIBERO_PATH=/home/elias/Thesis/LIBERO/libero/libero
 export LIBERO_CONFIG_PATH=/home/elias/Thesis/LIBERO/.libero
 PYTHONPATH=/home/elias/Thesis/src/openvla:$PYTHONPATH python experiments/robot/libero/run_libero_eval.py \
   --model_family openvla \
-  --pretrained_checkpoint /home/elias/Thesis/checkpoints/distill_norm_0_temp_4.0_small \
+  --pretrained_checkpoint /home/elias/Thesis/checkpoints/distill_infonce_norm_1_temp_0.07_weight_0.3_full \
   --task_suite_name libero_spatial \
   --center_crop True \
   --num_trials_per_task 20 \
-  --seed 7 \
   --load_in_8bit True \
   --use_wandb True \
   --wandb_project openvla-distill-eval \

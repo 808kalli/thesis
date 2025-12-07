@@ -360,7 +360,7 @@ class GenerateConfig:
     #################################################################################################################
     task_suite_name: str = "libero_spatial"          # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
-    num_trials_per_task: int = 20                    # Number of rollouts per task
+    num_trials_per_task: int = 50                    # Number of rollouts per task
 
     #################################################################################################################
     # Utils
@@ -435,11 +435,10 @@ def eval_libero(cfg: GenerateConfig) -> None:
     if cfg.is_baseline:
         config_name = "finetune_full"
     elif training_config:
-        distill_config = training_config.get('distillation', {})
-
-        loss_type = distill_config.get('distill_loss_type', 'unknown')
-        temp = distill_config.get('distill_temperature', 0.0)
-        weight = distill_config.get('distill_weight', 0.0)
+        # Training script uses asdict() which creates flat structure
+        loss_type = training_config.get('distill_loss_type', 'unknown')
+        temp = training_config.get('distill_temperature', 0.0)
+        weight = training_config.get('distill_weight', 0.0)
 
         config_name = f"distill_{loss_type}_temp_{temp}_weight_{weight}_full"
     else:
@@ -492,175 +491,222 @@ def eval_libero(cfg: GenerateConfig) -> None:
     print(f"[DEBUG] Image flip: ENABLED (to match flipped training data)")
     print(f"{'='*80}\n")
 
-    # Start evaluation
-    total_episodes, total_successes = 0, 0
-    first_action_printed = False  # Flag to print actions only once
-    
-    for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
-        # Get task
-        task = task_suite.get_task(task_id)
+    # Start evaluation - run with multiple seeds and average
+    seeds = [7, 20, 100]
+    all_seeds_results = {}  # {task_description: [success_rates across seeds]}
 
-        # Get default LIBERO initial states
-        initial_states = task_suite.get_task_init_states(task_id)
+    for seed in seeds:
+        set_seed_everywhere(seed)
+        print(f"\n{'='*80}")
+        print(f"Running evaluation with seed: {seed}")
+        print(f"{'='*80}\n")
+        log_file.write(f"\n{'='*80}\n")
+        log_file.write(f"Seed: {seed}\n")
+        log_file.write(f"{'='*80}\n\n")
 
-        # Initialize LIBERO environment and task description
-        env, task_description = get_libero_env(task, cfg.model_family, resolution=256)
+        total_episodes, total_successes = 0, 0
+        first_action_printed = False  # Flag to print actions only once
 
-        # Start episodes
-        task_episodes, task_successes = 0, 0
-        for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
-            print(f"\nTask: {task_description}")
-            log_file.write(f"\nTask: {task_description}\n")
+        for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
+            # Get task
+            task = task_suite.get_task(task_id)
 
-            # Reset environment
-            env.reset()
+            # Get default LIBERO initial states
+            initial_states = task_suite.get_task_init_states(task_id)
 
-            # Set initial states
-            obs = env.set_init_state(initial_states[episode_idx])
+            # Initialize LIBERO environment and task description
+            env, task_description = get_libero_env(task, cfg.model_family, resolution=256)
 
-            # Setup
-            t = 0
-            replay_images = []
-            if cfg.task_suite_name == "libero_spatial":
-                max_steps = 220  # longest training demo has 193 steps
-            elif cfg.task_suite_name == "libero_object":
-                max_steps = 280  # longest training demo has 254 steps
-            elif cfg.task_suite_name == "libero_goal":
-                max_steps = 300  # longest training demo has 270 steps
-            elif cfg.task_suite_name == "libero_10":
-                max_steps = 520  # longest training demo has 505 steps
-            elif cfg.task_suite_name == "libero_90":
-                max_steps = 400  # longest training demo has 373 steps
+            # Start episodes
+            task_episodes, task_successes = 0, 0
+            for episode_idx in tqdm.tqdm(range(cfg.num_trials_per_task)):
+                print(f"\nTask: {task_description}")
+                log_file.write(f"\nTask: {task_description}\n")
 
-            print(f"Starting episode {task_episodes+1}...")
-            log_file.write(f"Starting episode {task_episodes+1}...\n")
-            
-            while t < max_steps + cfg.num_steps_wait:
-                try:
-                    # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
-                    # and we need to wait for them to fall
-                    if t < cfg.num_steps_wait:
-                        obs, reward, done, info = env.step(get_libero_dummy_action(cfg.model_family))
-                        t += 1
-                        continue
+                # Reset environment
+                env.reset()
 
-                    # Get preprocessed image - keep at 256x256, let model resize
-                    img = get_libero_image(obs, resize_size)
-                    
-                    # Save original (unflipped) image for replay video so text is readable
-                    replay_images.append(img)
-                    
-                    # FIX: Flip image both vertically and horizontally (180° rotation) to match training data
-                    # img = np.flipud(np.fliplr(img)).copy()
-                    
-                    # Debug: Print image shape once per episode
-                    if not first_action_printed and t == cfg.num_steps_wait:
-                        print(f"\n{'='*80}")
-                        print(f"[DEBUG] Image shape sent to model (after flip): {img.shape}")
-                        print(f"{'='*80}\n")
+                # Set initial states
+                obs = env.set_init_state(initial_states[episode_idx])
 
-                    # Prepare observations dict
-                    # Note: OpenVLA does not take proprio state as input
-                    observation = {
-                        "full_image": img,
-                        "state": np.concatenate(
-                            (obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"])
-                        ),
-                    }
+                # Setup
+                t = 0
+                replay_images = []
+                if cfg.task_suite_name == "libero_spatial":
+                    max_steps = 220  # longest training demo has 193 steps
+                elif cfg.task_suite_name == "libero_object":
+                    max_steps = 280  # longest training demo has 254 steps
+                elif cfg.task_suite_name == "libero_goal":
+                    max_steps = 300  # longest training demo has 270 steps
+                elif cfg.task_suite_name == "libero_10":
+                    max_steps = 520  # longest training demo has 505 steps
+                elif cfg.task_suite_name == "libero_90":
+                    max_steps = 400  # longest training demo has 373 steps
 
-                    # Query model to get action
-                    action = get_action(
-                        cfg,
-                        model,
-                        observation,
-                        task_description,
-                        processor=processor,
-                    )
+                print(f"Starting episode {task_episodes+1}...")
+                log_file.write(f"Starting episode {task_episodes+1}...\n")
 
-                    # Debug: Print action transformations for first action only
-                    if not first_action_printed:
-                        print(f"\n{'='*80}")
-                        print(f"[DEBUG] Action transformations (step {t}):")
-                        print(f"  Raw action from model: {action}")
-                        print(f"  Raw action shape: {action.shape}")
-                        print(f"  Position (xyz): {action[:3]}")
-                        print(f"  Rotation (axis-angle): {action[3:6]}")
-                        print(f"  Gripper (raw): {action[6]}")
-                        
-                    # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
-                    action = normalize_gripper_action(action, binarize=True)
-                    
-                    if not first_action_printed:
-                        print(f"  After normalize_gripper_action:")
-                        print(f"    Gripper (normalized): {action[6]}")
+                while t < max_steps + cfg.num_steps_wait:
+                    try:
+                        # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
+                        # and we need to wait for them to fall
+                        if t < cfg.num_steps_wait:
+                            obs, reward, done, info = env.step(get_libero_dummy_action(cfg.model_family))
+                            t += 1
+                            continue
 
-                    # [OpenVLA] The dataloader flips the sign of the gripper action to align with other datasets
-                    # (0 = close, 1 = open), so flip it back (-1 = open, +1 = close) before executing the action
-                    if cfg.model_family == "openvla":
-                        # action = invert_gripper_action(action)
-                        if not first_action_printed:
-                            print(f"  After invert_gripper_action:")
-                            print(f"    Gripper (inverted): {action[6]}")
-                            print(f"  Final action: {action}")
+                        # Get preprocessed image - keep at 256x256, let model resize
+                        img = get_libero_image(obs, resize_size)
+
+                        # Save original (unflipped) image for replay video so text is readable
+                        replay_images.append(img)
+
+                        # FIX: Flip image both vertically and horizontally (180° rotation) to match training data
+                        # img = np.flipud(np.fliplr(img)).copy()
+
+                        # Debug: Print image shape once per episode
+                        if not first_action_printed and t == cfg.num_steps_wait:
+                            print(f"\n{'='*80}")
+                            print(f"[DEBUG] Image shape sent to model (after flip): {img.shape}")
                             print(f"{'='*80}\n")
-                            first_action_printed = True
 
-                    # Execute action in environment
-                    obs, reward, done, info = env.step(action.tolist())
-                    if done:
-                        task_successes += 1
-                        total_successes += 1
+                        # Prepare observations dict
+                        # Note: OpenVLA does not take proprio state as input
+                        observation = {
+                            "full_image": img,
+                            "state": np.concatenate(
+                                (obs["robot0_eef_pos"], quat2axisangle(obs["robot0_eef_quat"]), obs["robot0_gripper_qpos"])
+                            ),
+                        }
+
+                        # Query model to get action
+                        action = get_action(
+                            cfg,
+                            model,
+                            observation,
+                            task_description,
+                            processor=processor,
+                        )
+
+                        # Debug: Print action transformations for first action only
+                        if not first_action_printed:
+                            print(f"\n{'='*80}")
+                            print(f"[DEBUG] Action transformations (step {t}):")
+                            print(f"  Raw action from model: {action}")
+                            print(f"  Raw action shape: {action.shape}")
+                            print(f"  Position (xyz): {action[:3]}")
+                            print(f"  Rotation (axis-angle): {action[3:6]}")
+                            print(f"  Gripper (raw): {action[6]}")
+
+                        # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
+                        action = normalize_gripper_action(action, binarize=True)
+
+                        if not first_action_printed:
+                            print(f"  After normalize_gripper_action:")
+                            print(f"    Gripper (normalized): {action[6]}")
+
+                        # [OpenVLA] The dataloader flips the sign of the gripper action to align with other datasets
+                        # (0 = close, 1 = open), so flip it back (-1 = open, +1 = close) before executing the action
+                        if cfg.model_family == "openvla":
+                            # action = invert_gripper_action(action)
+                            if not first_action_printed:
+                                print(f"  After invert_gripper_action:")
+                                print(f"    Gripper (inverted): {action[6]}")
+                                print(f"  Final action: {action}")
+                                print(f"{'='*80}\n")
+                                first_action_printed = True
+
+                        # Execute action in environment
+                        obs, reward, done, info = env.step(action.tolist())
+                        if done:
+                            task_successes += 1
+                            total_successes += 1
+                            break
+                        t += 1
+
+                    except Exception as e:
+                        print(f"Caught exception: {e}")
+                        log_file.write(f"Caught exception: {e}\n")
                         break
-                    t += 1
 
-                except Exception as e:
-                    print(f"Caught exception: {e}")
-                    log_file.write(f"Caught exception: {e}\n")
-                    break
+                task_episodes += 1
+                total_episodes += 1
 
-            task_episodes += 1
-            total_episodes += 1
+                # Save a replay video of the episode
+                save_rollout_video(
+                    replay_images, total_episodes, success=done, task_description=task_description,
+                    log_file=log_file, rollout_dir=str(rollout_dir)
+                )
 
-            # Save a replay video of the episode
-            save_rollout_video(
-                replay_images, total_episodes, success=done, task_description=task_description,
-                log_file=log_file, rollout_dir=str(rollout_dir)
-            )
+                # Log current results
+                print(f"Success: {done}")
+                print(f"# episodes completed so far: {total_episodes}")
+                print(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
+                log_file.write(f"Success: {done}\n")
+                log_file.write(f"# episodes completed so far: {total_episodes}\n")
+                log_file.write(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)\n")
+                log_file.flush()
 
-            # Log current results
-            print(f"Success: {done}")
-            print(f"# episodes completed so far: {total_episodes}")
-            print(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
-            log_file.write(f"Success: {done}\n")
-            log_file.write(f"# episodes completed so far: {total_episodes}\n")
-            log_file.write(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)\n")
+            # Log per-task results for this seed
+            task_success_rate = float(task_successes) / float(task_episodes)
+            print(f"Current task success rate: {task_success_rate}")
+            print(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
+            log_file.write(f"Current task success rate: {task_success_rate}\n")
+            log_file.write(f"Current total success rate: {float(total_successes) / float(total_episodes)}\n")
             log_file.flush()
 
-        # Log final results
-        print(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
-        print(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
-        log_file.write(f"Current task success rate: {float(task_successes) / float(task_episodes)}\n")
-        log_file.write(f"Current total success rate: {float(total_successes) / float(total_episodes)}\n")
-        log_file.flush()
-        if cfg.use_wandb:
-            wandb.log(
-                {
-                    f"success_rate/{task_description}": float(task_successes) / float(task_episodes),
-                    f"num_episodes/{task_description}": task_episodes,
-                }
-            )
+            # Store results for averaging across seeds
+            if task_description not in all_seeds_results:
+                all_seeds_results[task_description] = []
+            all_seeds_results[task_description].append(task_success_rate)
+
+    # Compute averages across seeds
+    print(f"\n{'='*80}")
+    print(f"AVERAGED RESULTS ACROSS {len(seeds)} SEEDS: {seeds}")
+    print(f"{'='*80}\n")
+    log_file.write(f"\n{'='*80}\n")
+    log_file.write(f"AVERAGED RESULTS ACROSS {len(seeds)} SEEDS: {seeds}\n")
+    log_file.write(f"{'='*80}\n\n")
+
+    task_avg_results = {}
+    all_task_success_rates = []
+    for task_desc, success_rates in all_seeds_results.items():
+        avg_success = np.mean(success_rates)
+        std_success = np.std(success_rates)
+        task_avg_results[task_desc] = avg_success
+        all_task_success_rates.append(avg_success)
+
+        print(f"Task: {task_desc}")
+        print(f"  Success rates per seed: {success_rates}")
+        print(f"  Average: {avg_success:.3f} ± {std_success:.3f}\n")
+        log_file.write(f"Task: {task_desc}\n")
+        log_file.write(f"  Success rates per seed: {success_rates}\n")
+        log_file.write(f"  Average: {avg_success:.3f} ± {std_success:.3f}\n\n")
+
+    # Overall average
+    overall_avg = np.mean(all_task_success_rates)
+    overall_std = np.std(all_task_success_rates)
+    print(f"Overall average success rate: {overall_avg:.3f} ± {overall_std:.3f}")
+    log_file.write(f"Overall average success rate: {overall_avg:.3f} ± {overall_std:.3f}\n")
 
     # Save local log file
     log_file.close()
 
-    # Push total metrics and local log file to wandb
+    # Push averaged metrics to wandb
     if cfg.use_wandb:
-        wandb.log(
-            {
-                "success_rate/total": float(total_successes) / float(total_episodes),
-                "num_episodes/total": total_episodes,
-            }
-        )
+        # Log per-task averaged results
+        for task_desc, avg_success in task_avg_results.items():
+            wandb.log({
+                f"success_rate/{task_desc}": avg_success,
+                f"num_trials_per_task": cfg.num_trials_per_task,
+                f"num_seeds": len(seeds),
+            })
+
+        # Log overall average
+        wandb.log({
+            "success_rate/total": overall_avg,
+            "num_seeds": len(seeds),
+        })
         wandb.save(local_log_filepath)
 
 
