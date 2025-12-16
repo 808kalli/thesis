@@ -389,7 +389,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
     set_seed_everywhere(cfg.seed)
 
     # [OpenVLA] Set action un-normalization key
-    cfg.unnorm_key = f"openvla_{cfg.task_suite_name}" if cfg.task_suite_name == "libero_spatial" or cfg.task_suite_name == "libero_object" else f"openvla_custom_name"
+    cfg.unnorm_key = f"openvla_{cfg.task_suite_name}" if cfg.task_suite_name == "libero_spatial" else f"openvla_libero_spatial"
     print(f"\n{'='*80}")
     print(f"[DEBUG] unnorm_key set to: {cfg.unnorm_key}")
     print(f"{'='*80}\n")
@@ -452,7 +452,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
     print(f"Logging to local log file: {local_log_filepath}")
 
     # Create rollout directory with same name
-    rollout_dir = log_dir / config_name
+    rollout_base_dir = Path("/home/elias/Thesis/rollouts/openvla/real")
+    rollout_dir = rollout_base_dir / config_name
     os.makedirs(rollout_dir, exist_ok=True)
     print(f"Saving rollouts to: {rollout_dir}")
 
