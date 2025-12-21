@@ -448,7 +448,10 @@ def train(cfg: TrainPipelineConfig):
             if wandb_logger:
                 wandb_log_dict = train_tracker.to_dict()
                 if output_dict:
-                    wandb_log_dict.update(output_dict)
+                    # Only add scalar values from output_dict (filter out tensors)
+                    for key, value in output_dict.items():
+                        if isinstance(value, (int, float)):
+                            wandb_log_dict[key] = value
                 wandb_logger.log_dict(wandb_log_dict, step)
             train_tracker.reset_averages()
 
