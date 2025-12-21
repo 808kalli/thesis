@@ -333,8 +333,15 @@ def train(cfg: TrainPipelineConfig):
             else:
                 logging.warning(f"Student projection MLP checkpoint not found at {mlp_path}")
 
+    # Count parameters including student projection MLP if distillation is enabled
     num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     num_total_params = sum(p.numel() for p in policy.parameters())
+
+    if student_projection_mlp is not None:
+        mlp_learnable_params = sum(p.numel() for p in student_projection_mlp.parameters() if p.requires_grad)
+        mlp_total_params = sum(p.numel() for p in student_projection_mlp.parameters())
+        num_learnable_params += mlp_learnable_params
+        num_total_params += mlp_total_params
 
     logging.info(colored("Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}")
     if cfg.env is not None:
@@ -344,6 +351,10 @@ def train(cfg: TrainPipelineConfig):
     logging.info(f"{dataset.num_episodes=}")
     logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
     logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
+
+    if student_projection_mlp is not None:
+        logging.info(f"  ├─ Policy: {sum(p.numel() for p in policy.parameters() if p.requires_grad)} learnable params")
+        logging.info(f"  └─ Student Projection MLP: {mlp_learnable_params} learnable params ({format_big_number(mlp_learnable_params)})")
 
     # create dataloader for offline training
     if hasattr(cfg.policy, "drop_n_last_frames"):
