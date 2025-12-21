@@ -97,13 +97,6 @@ def update_policy(
         # Forward pass through student policy
         task_loss, output_dict = policy.forward(batch)
 
-        # Compute action L1 loss for logging (accuracy-like metric for continuous actions)
-        if "actions" in output_dict and "action" in batch:
-            action_preds = output_dict["actions"]
-            action_gt = batch["action"]
-            action_loss = torch.nn.functional.l1_loss(action_preds, action_gt)
-            output_dict["action_loss"] = action_loss.item()
-
         # Add distillation loss if enabled
         if teacher_hidden_states is not None and student_projection_mlp is not None and distillation_loss_fn is not None:
             # Extract student hidden states (scene understanding from SmolVLA VLM)
@@ -185,8 +178,6 @@ def update_policy(
     train_metrics.update_s = time.perf_counter() - start_time
 
     # Add custom metrics to train_metrics for WandB logging
-    if "action_loss" in output_dict:
-        train_metrics.action_loss = output_dict["action_loss"]
     if "task_loss" in output_dict:
         train_metrics.task_loss = output_dict["task_loss"]
     if "distill_loss" in output_dict:
@@ -387,7 +378,6 @@ def train(cfg: TrainPipelineConfig):
         "lr": AverageMeter("lr", ":0.1e"),
         "update_s": AverageMeter("updt_s", ":.3f"),
         "dataloading_s": AverageMeter("data_s", ":.3f"),
-        "action_loss": AverageMeter("action_loss", ":.4f"),
         "task_loss": AverageMeter("task_loss", ":.3f"),
         "distill_loss": AverageMeter("distill_loss", ":.3f"),
     }
@@ -438,7 +428,6 @@ def train(cfg: TrainPipelineConfig):
             print(f"STEP {step} METRICS:")
             print(f"{'='*80}")
             print(f"  loss:         {metrics_dict.get('loss', 'N/A'):.4f}")
-            print(f"  action_loss:  {metrics_dict.get('action_loss', 'N/A'):.4f}")
             print(f"  task_loss:    {metrics_dict.get('task_loss', 'N/A'):.4f}")
             print(f"  distill_loss: {metrics_dict.get('distill_loss', 'N/A'):.4f}")
             print(f"  grad_norm:    {metrics_dict.get('grad_norm', 'N/A'):.4f}")
