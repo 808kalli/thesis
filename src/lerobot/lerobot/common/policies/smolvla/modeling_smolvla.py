@@ -474,6 +474,11 @@ class SmolVLAPolicy(PreTrainedPolicy):
         loss = losses.mean()
         # For backward pass
         loss_dict["loss"] = loss.item()
+
+        # Expose prefix_out for distillation (scene understanding hidden states)
+        if hasattr(self.model, 'prefix_out'):
+            loss_dict["prefix_out"] = self.model.prefix_out  # [batch, 149, 960]
+
         return loss, loss_dict
 
     def prepare_images(self, batch):
@@ -848,7 +853,7 @@ class VLAFlowMatching(nn.Module):
 
         att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
         position_ids = torch.cumsum(pad_masks, dim=1) - 1
-        (_, suffix_out), _ = self.vlm_with_expert.forward(
+        (prefix_out, suffix_out), _ = self.vlm_with_expert.forward(
             attention_mask=att_2d_masks,
             position_ids=position_ids,
             past_key_values=None,
@@ -856,11 +861,25 @@ class VLAFlowMatching(nn.Module):
             use_cache=False,
             fill_kv_cache=False,
         )
-        suffix_out = suffix_out[:, -self.config.chunk_size :]
+        
+        #DEBUG PRINT
+        # print(f"\n{'='*80}")
+        # print(f"[DEBUG] Hidden states dimensions:")
+        # print(f"  prefix_out shape (scene understanding): {prefix_out.shape}")
+        # print(f"  suffix_out shape (before slicing): {suffix_out.shape}")
+        # suffix_out = suffix_out[:, -self.config.chunk_size :]
+        # print(f"  suffix_out shape (after slicing): {suffix_out.shape}")
+        # print(f"  chunk_size: {self.config.chunk_size}")
+        # print(f"{'='*80}\n")
+
         # Original openpi code, upcast attention output
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
         losses = F.mse_loss(u_t, v_t, reduction="none")
+
+        # Store prefix_out for distillation (scene understanding hidden states)
+        self.prefix_out = prefix_out
+
         return losses
 
     def sample_actions(self, images, img_masks, lang_tokens, lang_masks, state, noise=None) -> Tensor:

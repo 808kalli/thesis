@@ -1,15 +1,18 @@
 """
-distillation_utils.py
+smolvla_distillation_utils.py
 
-Utilities for knowledge distillation from teacher (LAPA) hidden states to student (OpenVLA) models.
+Utilities for knowledge distillation from teacher (LAPA) hidden states to student (SmolVLA) models.
+
+Key differences from OpenVLA distillation:
+1. Student hidden dim: 960 (SmolVLA VLM) instead of 4096 (OpenVLA)
+2. Hidden states source: prefix_out (scene understanding) instead of action tokens
+3. Sequence aggregation: [batch, 149, 960] → [batch, 960] before MLP
 
 This module provides:
 1. AggregationMethod: Enum for sequence aggregation methods (LAST or MEAN)
 2. StudentSequenceProjectionMLP: Projects student hidden states through bottleneck MLP
 3. SimilarityMatrixDistillationLoss: KL divergence loss on similarity matrices
 4. InfoNCEDistillationLoss: InfoNCE contrastive loss on cross-modal similarities
-
-Note: Teacher states are precomputed and aggregated offline using precompute_teacher_dataset.py
 """
 
 from enum import Enum
@@ -27,89 +30,80 @@ class AggregationMethod(Enum):
 
 class StudentSequenceProjectionMLP(nn.Module):
     """
-    Projects student hidden states through a bottleneck MLP.
-    Converts [batch, seq_len, input_dim] → [batch, input_dim]
+    Projects SmolVLA student hidden states through a bottleneck MLP.
+    Converts [batch, seq_len, 960] → [batch, 4096]
 
     Architecture:
-        Input [batch, seq_len, 4096]
+        Input [batch, 149, 960]  (SmolVLA prefix_out: scene understanding)
             ↓
-        Aggregate (last or mean) → [batch, 4096]
+        Aggregate (last or mean) → [batch, 960]
             ↓
-        Linear(4096 → 2048)
+        Linear(960 → bottleneck_dim)
             ↓
         ReLU
             ↓
-        Linear(2048 → 4096)
+        Linear(bottleneck_dim → 4096)
             ↓
-        Output [batch, 4096]
+        Output [batch, 4096] (matches teacher LAPA dimension)
 
     Used for STUDENT only (aggregation + bottleneck MLP).
     """
 
     def __init__(
         self,
-        input_dim: int = 4096,
-        bottleneck_dim: int = 2048,
-        aggregation_method: AggregationMethod = AggregationMethod.LAST,
+        input_dim: int = 960,  # SmolVLA VLM hidden dim
+        output_dim: int = 4096,  # Teacher (LAPA) hidden dim
+        bottleneck_dim: int = 512,  # Bottleneck dimension
+        aggregation_method: AggregationMethod = AggregationMethod.MEAN,
     ):
         """
         Args:
-            input_dim: Input dimension from model (e.g., 4096 for OpenVLA)
-            bottleneck_dim: Intermediate bottleneck dimension (e.g., 2048 for 50% compression)
+            input_dim: Input dimension from SmolVLA VLM (960)
+            output_dim: Output dimension to match teacher (4096)
+            bottleneck_dim: Intermediate bottleneck dimension (e.g., 512 for compression)
             aggregation_method: How to aggregate sequence dimension (last or mean)
         """
         super().__init__()
         self.aggregation_method = aggregation_method
         self.input_dim = input_dim
+        self.output_dim = output_dim
         self.bottleneck_dim = bottleneck_dim
 
-        # MLP: input_dim → bottleneck_dim → input_dim
+        # MLP: 960 → bottleneck_dim → 4096
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, bottleneck_dim),
             nn.ReLU(),
-            nn.Linear(bottleneck_dim, input_dim),
+            nn.Linear(bottleneck_dim, output_dim),
         )
-
-    def aggregate_only(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """
-        Aggregate sequence dimension only (no MLP projection).
-
-        Args:
-            hidden_states: [batch, seq_len, input_dim]
-
-        Returns:
-            aggregated: [batch, input_dim]
-        """
-        if self.aggregation_method == AggregationMethod.LAST:
-            aggregated = hidden_states[:, -1, :]  # [batch, input_dim]
-        elif self.aggregation_method == AggregationMethod.MEAN:
-            aggregated = hidden_states.mean(dim=1)  # [batch, input_dim]
-        else:
-            raise ValueError(f"Unknown aggregation method: {self.aggregation_method}")
-        return aggregated
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            hidden_states: [batch, seq_len, input_dim]
+            hidden_states: [batch, seq_len, 960] - SmolVLA prefix_out
 
         Returns:
-            projected: [batch, input_dim]
+            projected: [batch, 4096] - matches teacher dimension
         """
         # First: aggregate sequence dimension
-        aggregated = self.aggregate_only(hidden_states)
+        if self.aggregation_method == AggregationMethod.LAST:
+            aggregated = hidden_states[:, -1, :]  # [batch, 960]
+        elif self.aggregation_method == AggregationMethod.MEAN:
+            aggregated = hidden_states.mean(dim=1)  # [batch, 960]
+        else:
+            raise ValueError(f"Unknown aggregation method: {self.aggregation_method}")
 
         # Convert to float32 for MLP computation (handle BFloat16/Float16 inputs)
         original_dtype = aggregated.dtype
         aggregated = aggregated.float()
 
-        # Second: project through bottleneck MLP
-        projected = self.mlp(aggregated)  # [batch, input_dim]
+        # Second: project through bottleneck MLP (960 → bottleneck → 4096)
+        projected = self.mlp(aggregated)  # [batch, 4096]
 
         # Convert back to original dtype
         projected = projected.to(original_dtype)
 
         return projected
+
 
 class SimilarityMatrixDistillationLoss(nn.Module):
     """
@@ -125,7 +119,7 @@ class SimilarityMatrixDistillationLoss(nn.Module):
 
     def __init__(
         self,
-        student_hidden_dim: int = 4096,
+        student_hidden_dim: int = 4096,  # After projection
         teacher_hidden_dim: int = 4096,
         temperature_student: float = 1.0,
         temperature_teacher: float = 1.0,
@@ -137,8 +131,8 @@ class SimilarityMatrixDistillationLoss(nn.Module):
     ):
         """
         Args:
-            student_hidden_dim: Dimension of student hidden states
-            teacher_hidden_dim: Dimension of teacher hidden states
+            student_hidden_dim: Dimension of student hidden states (after MLP projection = 4096)
+            teacher_hidden_dim: Dimension of teacher hidden states (4096)
             temperature_student: Temperature for student softmax (higher = softer, only used if apply_softmax=True)
             temperature_teacher: Temperature for teacher softmax (higher = softer, only used if apply_softmax=True)
             normalize: Whether to L2 normalize before computing similarity
@@ -169,13 +163,13 @@ class SimilarityMatrixDistillationLoss(nn.Module):
 
     def forward(
         self,
-        student_hidden_states: torch.Tensor,  # [batch, hidden_dim]
-        teacher_hidden_states: torch.Tensor,  # [batch, hidden_dim]
+        student_hidden_states: torch.Tensor,  # [batch, 4096]
+        teacher_hidden_states: torch.Tensor,  # [batch, 4096]
     ) -> torch.Tensor:
         """
         Args:
-            student_hidden_states: [batch, hidden_dim]
-            teacher_hidden_states: [batch, hidden_dim]
+            student_hidden_states: [batch, 4096] - student embeddings after MLP projection
+            teacher_hidden_states: [batch, 4096] - teacher embeddings
 
         Returns:
             loss: scalar KL divergence loss
@@ -259,7 +253,7 @@ class InfoNCEDistillationLoss(nn.Module):
 
     def __init__(
         self,
-        student_hidden_dim: int = 4096,
+        student_hidden_dim: int = 4096,  # After projection
         teacher_hidden_dim: int = 4096,
         temperature: float = 0.1,
         normalize: bool = True,
@@ -268,8 +262,8 @@ class InfoNCEDistillationLoss(nn.Module):
     ):
         """
         Args:
-            student_hidden_dim: Dimension of student hidden states
-            teacher_hidden_dim: Dimension of teacher hidden states
+            student_hidden_dim: Dimension of student hidden states (after MLP projection = 4096)
+            teacher_hidden_dim: Dimension of teacher hidden states (4096)
             temperature: Temperature for scaling similarities (lower = sharper distribution)
             normalize: Whether to L2 normalize before computing similarity
             projection_dim: If specified, project to this dimension before similarity computation
@@ -294,13 +288,13 @@ class InfoNCEDistillationLoss(nn.Module):
 
     def forward(
         self,
-        student_hidden_states: torch.Tensor,  # [batch, hidden_dim]
-        teacher_hidden_states: torch.Tensor,  # [batch, hidden_dim]
+        student_hidden_states: torch.Tensor,  # [batch, 4096]
+        teacher_hidden_states: torch.Tensor,  # [batch, 4096]
     ) -> torch.Tensor:
         """
         Args:
-            student_hidden_states: [batch, hidden_dim] - student embeddings
-            teacher_hidden_states: [batch, hidden_dim] - teacher embeddings
+            student_hidden_states: [batch, 4096] - student embeddings after MLP projection
+            teacher_hidden_states: [batch, 4096] - teacher embeddings
 
         Returns:
             loss: scalar InfoNCE contrastive loss
@@ -316,8 +310,8 @@ class InfoNCEDistillationLoss(nn.Module):
 
         # Optional normalization (critical for InfoNCE)
         if self.normalize:
-            student_hidden_states = F.normalize(student_hidden_states, p=2, dim=1)  # [batch, hidden_dim]
-            teacher_hidden_states = F.normalize(teacher_hidden_states, p=2, dim=1)  # [batch, hidden_dim]
+            student_hidden_states = F.normalize(student_hidden_states, p=2, dim=1)  # [batch, 4096]
+            teacher_hidden_states = F.normalize(teacher_hidden_states, p=2, dim=1)  # [batch, 4096]
 
         # Optional LayerNorm for per-sample stabilization (independent of L2 norm)
         if self.use_layer_norm:

@@ -659,20 +659,22 @@ def finetune(cfg: FinetuneConfig) -> None:
 
             teacher_hidden_aggregated = torch.stack(teacher_hidden_aggregated_list).to(device_id)
 
-            # Aggregate student sequences to single representations
-            student_hidden_aggregated = sequence_aggregation_student(student_hidden_states_full)
-
-            # Log aggregated hidden states for first 100 batches (AFTER aggregation)
+            # Log UNPROJECTED aggregated hidden states for first 100 batches (aggregation only, no MLP)
             if batch_idx < 100:
+                # Use aggregate_only() to get unprojected states [batch, 4096]
+                student_hidden_unprojected = sequence_aggregation_student.aggregate_only(student_hidden_states_full)
                 log_file = hidden_state_dir / f"batch_{batch_idx:04d}.npz"
                 np.savez_compressed(
                     log_file,
-                    student_hidden=student_hidden_aggregated.detach().float().cpu().numpy(),
+                    student_hidden=student_hidden_unprojected.detach().float().cpu().numpy(),
                     teacher_hidden=teacher_hidden_aggregated.detach().float().cpu().numpy(),
                     batch_idx=batch_idx,
                     aggregation_method=cfg.aggregation_method,
                     batch_size=batch_size,
                 )
+
+            # Aggregate student sequences through full pipeline (aggregation + MLP projection)
+            student_hidden_aggregated = sequence_aggregation_student(student_hidden_states_full)
 
             # Compute KL divergence loss on similarity matrices
             with torch.autocast("cuda", dtype=torch.float32):  # Use full precision for loss

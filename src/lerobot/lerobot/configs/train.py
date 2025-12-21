@@ -33,6 +33,31 @@ TRAIN_CONFIG_NAME = "train_config.json"
 
 
 @dataclass
+class DistillationConfig:
+    """Configuration for knowledge distillation from teacher to student models."""
+
+    teacher_hidden_states_path: Path | None = None
+    student_hidden_dim: int = 960
+    teacher_hidden_dim: int = 4096
+    bottleneck_dim: int = 512
+    aggregation_method: str = "mean"
+    distill_loss_type: str = "similarity"
+    distill_weight: float = 0.1
+    distill_temperature: float = 1.0
+    infonce_temperature: float = 0.1
+    normalize: bool = True
+    mask_diagonal: bool = True
+    use_layer_norm: bool = False
+    projection_dim: int | None = None
+    apply_softmax: bool = True
+    gradient_clip_norm: float | None = None
+    weight_decay_enabled: bool = False
+    weight_decay_start_step: int = 10_000
+    weight_decay_end_step: int = 12_000
+    weight_decay_final_ratio: float = 0.1
+
+
+@dataclass
 class TrainPipelineConfig(HubMixin):
     dataset: DatasetConfig
     env: envs.EnvConfig | None = None
@@ -63,6 +88,7 @@ class TrainPipelineConfig(HubMixin):
     scheduler: LRSchedulerConfig | None = None
     eval: EvalConfig = field(default_factory=EvalConfig)
     wandb: WandBConfig = field(default_factory=WandBConfig)
+    distillation: DistillationConfig | None = None
 
     def __post_init__(self):
         self.checkpoint_path = None
