@@ -3521,3 +3521,240 @@ Task: pick up the black bowl on the wooden cabinet and place it on the plate
 2025-10-25 01:00:47,782 - INFO - Total success rate: 0.69
 2025-10-25 01:00:47,782 - INFO - Total episodes: 500
 2025-10-25 01:00:47,782 - INFO - Total successes: 345
+2025-12-22 22:49:13,595 - INFO - We will use 90% of the memory on device 0 for storing the model, and 10% for the buffer to avoid OOM. You can set `max_memory` in to a higher value to use more memory (at your own risk).
+2025-12-22 22:49:25,620 - INFO - Task suite: libero_spatial
+2025-12-22 22:49:28,941 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 22:49:30,293 - INFO - Starting episode 1...
+2025-12-22 22:50:24,313 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_224855/seed_7_task_0_episode_0_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 22:50:24,316 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 22:50:25,668 - INFO - Starting episode 2...
+2025-12-22 22:50:45,167 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_224855/seed_7_task_0_episode_1_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_success.mp4
+2025-12-22 22:50:45,169 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 22:50:46,518 - INFO - Starting episode 3...
+2025-12-22 22:51:40,951 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_224855/seed_7_task_0_episode_2_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 22:51:40,954 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 22:51:42,320 - INFO - Starting episode 4...
+2025-12-22 22:52:04,771 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_224855/seed_7_task_0_episode_3_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_success.mp4
+2025-12-22 22:52:04,774 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 22:52:06,182 - INFO - Starting episode 5...
+2025-12-22 22:53:01,129 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_224855/seed_7_task_0_episode_4_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 22:53:01,132 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 22:53:02,544 - INFO - Starting episode 6...
+2025-12-22 22:53:57,032 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_224855/seed_7_task_0_episode_5_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 22:53:57,034 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 22:53:58,494 - INFO - Starting episode 7...
+2025-12-22 22:54:52,565 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_224855/seed_7_task_0_episode_6_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 22:54:52,569 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 22:54:53,944 - INFO - Starting episode 8...
+2025-12-22 22:55:14,347 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_224855/seed_7_task_0_episode_7_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_success.mp4
+2025-12-22 22:55:14,351 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 22:55:15,746 - INFO - Starting episode 9...
+2025-12-22 22:56:10,280 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_224855/seed_7_task_0_episode_8_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 22:56:10,283 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 22:56:11,668 - INFO - Starting episode 10...
+2025-12-22 22:57:06,035 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_224855/seed_7_task_0_episode_9_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 22:57:06,037 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 22:57:07,396 - INFO - Starting episode 11...
+2025-12-22 22:58:02,283 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_224855/seed_7_task_0_episode_10_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 22:58:02,285 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 22:58:03,675 - INFO - Starting episode 12...
+2025-12-22 22:58:25,105 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_224855/seed_7_task_0_episode_11_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_success.mp4
+2025-12-22 22:58:25,108 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 22:58:26,480 - INFO - Starting episode 13...
+2025-12-22 22:58:43,045 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,045 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,050 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,050 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,050 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,050 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,051 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,051 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,051 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,051 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,051 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,051 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,052 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,052 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,052 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,052 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,052 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,053 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,053 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,053 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,053 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,054 - WARNING - socket.send() raised exception.
+2025-12-22 22:58:43,068 - WARNING - socket.send() raised exception.
+2025-12-22 23:00:44,788 - INFO - We will use 90% of the memory on device 0 for storing the model, and 10% for the buffer to avoid OOM. You can set `max_memory` in to a higher value to use more memory (at your own risk).
+2025-12-22 23:01:00,043 - INFO - Task suite: libero_spatial
+2025-12-22 23:01:03,297 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:01:04,759 - INFO - Starting episode 1...
+2025-12-22 23:04:43,284 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_0_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 23:04:43,291 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:04:45,150 - INFO - Starting episode 2...
+2025-12-22 23:05:14,432 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_1_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_success.mp4
+2025-12-22 23:05:14,435 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:05:16,029 - INFO - Starting episode 3...
+2025-12-22 23:06:37,114 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_2_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 23:06:37,116 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:06:38,641 - INFO - Starting episode 4...
+2025-12-22 23:07:13,856 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_3_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_success.mp4
+2025-12-22 23:07:13,859 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:07:15,435 - INFO - Starting episode 5...
+2025-12-22 23:07:47,086 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_4_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_success.mp4
+2025-12-22 23:07:47,089 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:07:48,615 - INFO - Starting episode 6...
+2025-12-22 23:09:08,425 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_5_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 23:09:08,427 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:09:09,939 - INFO - Starting episode 7...
+2025-12-22 23:10:30,639 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_6_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 23:10:30,643 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:10:32,170 - INFO - Starting episode 8...
+2025-12-22 23:11:01,370 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_7_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_success.mp4
+2025-12-22 23:11:01,373 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:11:02,890 - INFO - Starting episode 9...
+2025-12-22 23:12:22,611 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_8_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 23:12:22,613 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:12:24,146 - INFO - Starting episode 10...
+2025-12-22 23:12:55,429 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_9_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_success.mp4
+2025-12-22 23:12:55,432 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:12:56,974 - INFO - Starting episode 11...
+2025-12-22 23:14:17,165 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_10_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 23:14:17,167 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:14:18,741 - INFO - Starting episode 12...
+2025-12-22 23:14:47,362 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_11_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_success.mp4
+2025-12-22 23:14:47,365 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:14:48,926 - INFO - Starting episode 13...
+2025-12-22 23:15:38,180 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_12_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_success.mp4
+2025-12-22 23:15:38,184 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:15:39,728 - INFO - Starting episode 14...
+2025-12-22 23:16:59,932 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_13_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 23:16:59,935 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:17:01,525 - INFO - Starting episode 15...
+2025-12-22 23:17:34,218 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_14_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_success.mp4
+2025-12-22 23:17:34,221 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:17:35,759 - INFO - Starting episode 16...
+2025-12-22 23:18:56,555 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_15_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 23:18:56,558 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:18:58,115 - INFO - Starting episode 17...
+2025-12-22 23:19:30,085 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_16_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_success.mp4
+2025-12-22 23:19:30,087 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:19:31,645 - INFO - Starting episode 18...
+2025-12-22 23:20:00,211 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_17_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_success.mp4
+2025-12-22 23:20:00,213 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:20:01,777 - INFO - Starting episode 19...
+2025-12-22 23:21:12,900 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_18_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 23:21:12,902 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:21:14,305 - INFO - Starting episode 20...
+2025-12-22 23:22:09,020 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_19_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 23:22:09,023 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:22:10,424 - INFO - Starting episode 21...
+2025-12-22 23:22:29,917 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_20_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_success.mp4
+2025-12-22 23:22:29,920 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:22:31,317 - INFO - Starting episode 22...
+2025-12-22 23:23:46,098 - INFO - Saved video to /home/elias/Thesis/rollouts/smolvla/real/EVAL-libero_spatial-20251222_230032/seed_7_task_0_episode_21_pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate_failure.mp4
+2025-12-22 23:23:46,102 - INFO - 
+Task: pick up the black bowl between the plate and the ramekin and place it on the plate
+2025-12-22 23:23:47,665 - INFO - Starting episode 23...
+2025-12-22 23:23:54,723 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,723 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,731 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,731 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,731 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,731 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,731 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,731 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,732 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,732 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,732 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,732 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,732 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,732 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,733 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,733 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,733 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,733 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,733 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,734 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,734 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,734 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,734 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,735 - WARNING - socket.send() raised exception.
+2025-12-22 23:23:54,752 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:07,026 - INFO - We will use 90% of the memory on device 0 for storing the model, and 10% for the buffer to avoid OOM. You can set `max_memory` in to a higher value to use more memory (at your own risk).
+2025-12-22 23:25:10,057 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,057 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,060 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,060 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,061 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,061 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,062 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,062 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,062 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,063 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,063 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,063 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,063 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,063 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,063 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,063 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,063 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,063 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,064 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,064 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,064 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,064 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,064 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,064 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,064 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,064 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,064 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,065 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,065 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,065 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,065 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,065 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,065 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,065 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,065 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,065 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,066 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,067 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,067 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,067 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,067 - WARNING - socket.send() raised exception.
+2025-12-22 23:25:10,067 - WARNING - socket.send() raised exception.

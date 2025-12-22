@@ -253,9 +253,8 @@ class InteractiveBrowser:
             # InfoNCE: Single cross-modal matrix
             self.axes[0].clear()
             self.im1 = self.axes[0].imshow(student_sim, cmap="viridis", aspect="auto", vmin=vmin, vmax=vmax)
-            self.axes[0].set_title(f"{plot_title_left}\n(Batch {batch_data['batch_idx']}, Size {batch_data['batch_size']})")
-            self.axes[0].set_xlabel("Teacher Sample Index")
-            self.axes[0].set_ylabel("Student Sample Index")
+            self.axes[0].set_xlabel("Teacher Sample Index", fontsize=14)
+            self.axes[0].set_ylabel("Student Sample Index", fontsize=14)
             if self.cbar1 is not None:
                 self.cbar1.remove()
             self.cbar1 = plt.colorbar(self.im1, ax=self.axes[0])
@@ -296,17 +295,9 @@ class InteractiveBrowser:
                 f"Use arrow keys to navigate, q to quit"
             )
         else:  # infonce
-            title = (
-                f"Loss Type: InfoNCE | "
-                f"Aggregation: {batch_data['aggregation_method']} | "
-                f"Normalize: {self.normalize} | "
-                f"Temperature: {self.temperature_infonce} | "
-                f"Common Scale: {self.common_scale} | "
-                f"Batch {batch_idx}/{self.max_batch} | "
-                f"Use arrow keys to navigate, q to quit"
-            )
+            title = f"Temperature: {self.temperature_infonce} | Batch {batch_idx}/{self.max_batch}"
 
-        self.fig.suptitle(title, fontsize=10)
+        self.fig.suptitle(title, fontsize=14)
 
         self.current_batch = batch_idx
         self.fig.canvas.draw()

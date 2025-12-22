@@ -172,7 +172,7 @@ def update_policy(
         # To possibly update an internal buffer (for instance an Exponential Moving Average like in TDMPC).
         policy.update()
 
-    train_metrics.loss = loss.item()
+    train_metrics.total_loss = loss.item()
     train_metrics.grad_norm = grad_norm.item()
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
@@ -297,8 +297,7 @@ def train(cfg: TrainPipelineConfig):
     else:
         all_parameters = list(policy.parameters())
 
-    optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
-    # Update optimizer to include MLP parameters
+    # Create optimizer (with MLP parameters if needed)
     if student_projection_mlp is not None:
         optimizer = torch.optim.AdamW(
             all_parameters,
@@ -307,6 +306,10 @@ def train(cfg: TrainPipelineConfig):
             eps=cfg.optimizer.eps,
             weight_decay=cfg.optimizer.weight_decay,
         )
+        # Create scheduler AFTER optimizer (so it's bound to the correct optimizer)
+        lr_scheduler = cfg.scheduler.build(optimizer, cfg.steps) if cfg.scheduler is not None else None
+    else:
+        optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
 
     grad_scaler = GradScaler(device.type, enabled=cfg.policy.use_amp)
 
@@ -373,7 +376,7 @@ def train(cfg: TrainPipelineConfig):
     policy.train()
 
     train_metrics = {
-        "loss": AverageMeter("loss", ":.3f"),
+        "total_loss": AverageMeter("total_loss", ":.3f"),
         "grad_norm": AverageMeter("grad_norm", ":.3f"),
         "lr": AverageMeter("lr", ":0.1e"),
         "update_s": AverageMeter("updt_s", ":.3f"),
@@ -427,7 +430,7 @@ def train(cfg: TrainPipelineConfig):
             print(f"\n{'='*80}")
             print(f"STEP {step} METRICS:")
             print(f"{'='*80}")
-            print(f"  loss:         {metrics_dict.get('loss', 'N/A'):.4f}")
+            print(f"  total_loss:   {metrics_dict.get('total_loss', 'N/A'):.4f}")
             print(f"  task_loss:    {metrics_dict.get('task_loss', 'N/A'):.4f}")
             print(f"  distill_loss: {metrics_dict.get('distill_loss', 'N/A'):.4f}")
             print(f"  grad_norm:    {metrics_dict.get('grad_norm', 'N/A'):.4f}")
@@ -438,8 +441,9 @@ def train(cfg: TrainPipelineConfig):
                 wandb_log_dict = train_tracker.to_dict()
                 if output_dict:
                     # Only add scalar values from output_dict (filter out tensors)
+                    # Skip "loss" key to avoid overwriting the correct total loss from train_tracker
                     for key, value in output_dict.items():
-                        if isinstance(value, (int, float)):
+                        if isinstance(value, (int, float)) and key != "loss":
                             wandb_log_dict[key] = value
                 wandb_logger.log_dict(wandb_log_dict, step)
             train_tracker.reset_averages()
@@ -464,6 +468,21 @@ def train(cfg: TrainPipelineConfig):
                 mlp_path = checkpoint_dir / "student_projection_mlp.pt"
                 torch.save(student_projection_mlp.state_dict(), mlp_path)
                 logging.info(f"Saved student projection MLP to {mlp_path}")
+
+            # Save training config for evaluation script
+            import yaml
+            training_config = {
+                "distill_loss_type": cfg.distillation.loss_type if cfg.distillation else None,
+                "infonce_temperature": cfg.distillation.infonce_temperature if cfg.distillation and cfg.distillation.loss_type == "infonce" else None,
+                "distill_temperature": cfg.distillation.temperature if cfg.distillation and cfg.distillation.loss_type != "infonce" else None,
+                "distill_weight": cfg.distillation.weight if cfg.distillation else None,
+                "normalize": cfg.distillation.normalize if cfg.distillation else None,
+                "use_layer_norm": cfg.distillation.use_layer_norm if cfg.distillation else None,
+            }
+            training_config_path = checkpoint_dir / "training_config.yaml"
+            with open(training_config_path, 'w') as f:
+                yaml.dump(training_config, f, default_flow_style=False)
+            logging.info(f"Saved training config to {training_config_path}")
 
             update_last_checkpoint(checkpoint_dir)
             if wandb_logger:
