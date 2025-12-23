@@ -472,10 +472,10 @@ def train(cfg: TrainPipelineConfig):
             # Save training config for evaluation script
             import yaml
             training_config = {
-                "distill_loss_type": cfg.distillation.loss_type if cfg.distillation else None,
-                "infonce_temperature": cfg.distillation.infonce_temperature if cfg.distillation and cfg.distillation.loss_type == "infonce" else None,
-                "distill_temperature": cfg.distillation.temperature if cfg.distillation and cfg.distillation.loss_type != "infonce" else None,
-                "distill_weight": cfg.distillation.weight if cfg.distillation else None,
+                "distill_loss_type": cfg.distillation.distill_loss_type if cfg.distillation else None,
+                "infonce_temperature": cfg.distillation.infonce_temperature if cfg.distillation and cfg.distillation.distill_loss_type == "infonce" else None,
+                "distill_temperature": cfg.distillation.distill_temperature if cfg.distillation and cfg.distillation.distill_loss_type != "infonce" else None,
+                "distill_weight": cfg.distillation.distill_weight if cfg.distillation else None,
                 "normalize": cfg.distillation.normalize if cfg.distillation else None,
                 "use_layer_norm": cfg.distillation.use_layer_norm if cfg.distillation else None,
             }
