@@ -9,13 +9,15 @@ Navigate between episodes using arrow keys:
   - q or Esc: Quit
 
 Usage:
-    python compare_rollouts.py
+    python compare_rollouts.py --distilled_dir <path1> --vanilla_dir <path2>
+    python compare_rollouts.py <path1> <path2>  # Positional arguments also work
 """
 
 import cv2
 import os
 import glob
 import re
+import argparse
 from pathlib import Path
 import numpy as np
 
@@ -372,15 +374,14 @@ def print_eval_results():
     print("└" + "─" * 50 + "┴" + "─" * 22 + "┴" + "─" * 22 + "┘\n")
 
 if __name__ == "__main__":
-    distilled_dir = "/home/elias/Thesis/rollouts/openvla/2025_11_22"
-    vanilla_dir = "/home/elias/Thesis/rollouts/openvla/2025_11_23"
+    parser = argparse.ArgumentParser(description="Compare rollout videos side-by-side")
+    parser.add_argument("distilled_dir", help="Path to distilled model rollouts")
+    parser.add_argument("vanilla_dir", help="Path to vanilla model rollouts")
+    args = parser.parse_args()
 
     try:
-        # Print evaluation results first
-        print_eval_results()
-
-        # Then start the rollout viewer
-        comparer = RolloutComparer(distilled_dir, vanilla_dir)
+        # Start the rollout viewer
+        comparer = RolloutComparer(args.distilled_dir, args.vanilla_dir)
         comparer.run()
         print("\nExited successfully")
     except Exception as e:

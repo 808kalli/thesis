@@ -18,6 +18,7 @@
 Knowledge distillation training script for SmolVLA student from LAPA teacher.
 """
 
+import gc
 import logging
 import time
 from contextlib import nullcontext
@@ -457,8 +458,21 @@ def train(cfg: TrainPipelineConfig):
                 import shutil
                 for old_checkpoint in checkpoints_dir.iterdir():
                     if old_checkpoint.is_dir() and old_checkpoint.name != "last":
+                        # Get size before deletion
+                        checkpoint_size = sum(f.stat().st_size for f in old_checkpoint.rglob('*') if f.is_file())
+                        checkpoint_size_mb = checkpoint_size / (1024 * 1024)
+
                         shutil.rmtree(old_checkpoint)
-                        logging.info(f"Deleted old checkpoint: {old_checkpoint.name}")
+                        logging.info(f"Deleted old checkpoint: {old_checkpoint.name} ({checkpoint_size_mb:.1f} MB)")
+                # Force garbage collection after deletion
+                gc.collect()
+                torch.cuda.empty_cache()
+
+                # Check remaining disk space
+                import os
+                stat = os.statvfs(cfg.output_dir)
+                free_space_gb = (stat.f_bavail * stat.f_frsize) / (1024**3)
+                logging.info(f"Free disk space after deletion: {free_space_gb:.2f} GB")
 
             checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
             save_checkpoint(checkpoint_dir, step, cfg, policy, optimizer, lr_scheduler)
@@ -485,8 +499,13 @@ def train(cfg: TrainPipelineConfig):
             logging.info(f"Saved training config to {training_config_path}")
 
             update_last_checkpoint(checkpoint_dir)
-            if wandb_logger:
-                wandb_logger.log_policy(checkpoint_dir)
+
+            # Force garbage collection after saving
+            gc.collect()
+            torch.cuda.empty_cache()
+            # Disabled to save disk space (checkpoints are saved locally)
+            # if wandb_logger:
+            #     wandb_logger.log_policy(checkpoint_dir)
 
         if cfg.env and is_eval_step:
             step_id = get_step_identifier(step, cfg.steps)
