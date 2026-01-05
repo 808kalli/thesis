@@ -489,7 +489,6 @@ def eval_libero(cfg: GenerateConfig) -> None:
     print(f"\n{'='*80}")
     print(f"[DEBUG] Environment image size: {resize_size}x{resize_size}")
     print(f"[DEBUG] Model will internally resize to: {get_image_resize_size(cfg)}x{get_image_resize_size(cfg)}")
-    print(f"[DEBUG] Image flip: ENABLED (to match flipped training data)")
     print(f"{'='*80}\n")
 
     # Start evaluation - run with multiple seeds and average
