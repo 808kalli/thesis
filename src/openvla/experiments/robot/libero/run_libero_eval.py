@@ -492,8 +492,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
     print(f"{'='*80}\n")
 
     # Start evaluation - run with multiple seeds and average
-    # seeds = [7, 20, 100]
-    seeds = [7]
+    seeds = [7, 20, 100]
+    # seeds = [7]
     all_seeds_results = {}  # {task_description: [success_rates across seeds]}
 
     for seed in seeds:

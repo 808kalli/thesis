@@ -480,79 +480,91 @@ class LeRobotDataset(torch.utils.data.Dataset):
             self.download_episodes(download_videos)
             self.hf_dataset = self.load_hf_dataset()
 
-        #UNCOMMENT NORMALLY
-        self.episode_data_index = get_episode_data_index(self.meta.episodes, self.episodes)
+        # #UNCOMMENT NORMALLY
+        # self.episode_data_index = get_episode_data_index(self.meta.episodes, self.episodes)
 
 
         # --- PATCH DISABLED: Load ALL episodes instead of subset ---
-        # import numpy as np, torch
-        #
-        # # Set how many episodes you want (e.g. 100)
-        # N_EPISODES = 100
-        #
-        # # If you want to manually specify them, keep this list non-empty
+        import numpy as np, torch
+        
+        # Set how many episodes you want (e.g. 100)
+        N_EPISODES = 100
+        
+        # If you want to manually specify them, keep this list non-empty
         # manual_ids = [5, 7, 10, 13, 15, 17, 20, 22, 24, 25, 27, 33, 37, 39, 42, 45, 46, 53, 56, 60, 61, 65, 66, 71, 75, 76, 79, 82, 83, 86, 90, 93, 96, 102, 103, 105, 115, 121, 123, 125, 129, 131, 135, 137, 146, 147, 159, 164, 165, 167, 171, 179, 182, 185, 197, 200, 201, 203, 209, 216, 220, 224, 225, 226, 227, 231, 232, 251, 270, 276, 278, 283, 289, 294, 296, 306, 310, 313, 321, 324, 335, 358, 362, 366, 368, 374, 376, 379, 381, 384, 385, 395, 396, 398, 409, 410, 412, 414, 417, 425]
-        #
-        # # Otherwise automatically take the first N available episodes
-        # if manual_ids:
-        #     requested_ids = manual_ids
-        # else:
-        #     requested_ids = sorted(list(self.meta.episodes.keys()))[:N_EPISODES]
-        #
-        # print(f"[lerobot_dataset] Requested episode IDs: {requested_ids}")
-        #
-        # # 1) Keep only requested episodes (retain global indices)
-        # valid_ids = [i for i in requested_ids if i in self.meta.episodes]
-        # self.meta.episodes = {i: self.meta.episodes[i] for i in valid_ids}
-        # self.episodes = valid_ids
-        # print(f"[lerobot_dataset] Filtered {len(valid_ids)} episodes -> global IDs {self.episodes}")
-        #
-        # # 2) Filter hf_dataset rows to only include these episodes
-        # mask = [int(e.item()) in valid_ids for e in self.hf_dataset["episode_index"]]
-        # self.hf_dataset = self.hf_dataset.select([i for i, keep in enumerate(mask) if keep])
-        # print(f"[lerobot_dataset] Selected {len(self.hf_dataset)} frames across {len(valid_ids)} episodes.")
-        #
-        # # 3) Build episode_data_index in correct structure
-        # episode_indices = np.array(self.hf_dataset["episode_index"], dtype=np.int64)
-        # from_map, to_map = {}, {}
-        #
-        # for ep_id in self.episodes:
-        #     idxs = np.where(episode_indices == ep_id)[0]
-        #     if len(idxs) == 0:
-        #         continue
-        #     from_map[ep_id] = torch.tensor([idxs[0]], dtype=torch.int64)
-        #     to_map[ep_id]   = torch.tensor([idxs[-1]], dtype=torch.int64)
+        
+        # holdout_task_9
+        # manual_ids = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 30, 31, 32, 33, 36, 37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 50, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 66, 67, 68, 69, 70, 71, 72, 73, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 91, 92, 93, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 130, 131, 132, 133, 134, 135, 136, 137, 138, 140, 142, 143, 144, 145, 146, 148, 149, 152, 153, 154, 155, 156, 157, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 175, 176, 177, 179, 180, 181, 182, 184, 185, 187, 188, 189, 190, 191, 192, 194, 195, 196, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 217, 218, 219, 220, 221, 222, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 252, 253, 254, 255, 256, 258, 260, 261, 263, 264, 265, 266, 267, 268, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299, 300, 301, 302, 303, 304, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 321, 322, 323, 324, 325, 326, 327, 328, 329, 330, 331, 332, 333, 334, 335, 336, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346, 347, 348, 349, 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 360, 361, 362, 363, 364, 365, 368, 369, 370, 371, 373, 374, 375, 376, 377, 378, 379, 380, 381, 384, 385, 386, 387, 388, 389, 390, 391, 393, 394, 395, 396, 397, 398, 399, 400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 414, 415, 416, 417, 418, 419, 420, 421, 423, 424, 425, 426, 427, 428, 430, 431]
 
-        # self.episode_data_index = {"from": from_map, "to": to_map}
-        # print("[lerobot_dataset] Rebuilt episode_data_index for filtered subset.")
+        # holdout_tasks_7_8_9
+        manual_ids = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 23, 24, 27, 30, 31, 32, 37, 39, 40, 41, 42, 43, 46, 47, 48, 50, 52, 53, 58, 60, 63, 64, 66, 67, 68, 69, 71, 72, 73, 75, 76, 77, 78, 79, 80, 81, 82, 83, 85, 86, 87, 88, 91, 96, 98, 99, 101, 102, 103, 104, 105, 106, 107, 108, 110, 111, 112, 113, 117, 118, 120, 121, 123, 125, 126, 127, 128, 130, 131, 132, 133, 134, 135, 136, 137, 140, 142, 143, 144, 146, 148, 149, 152, 154, 155, 156, 157, 159, 160, 161, 162, 163, 164, 168, 169, 172, 173, 176, 177, 180, 182, 185, 187, 188, 189, 190, 191, 192, 195, 196, 198, 200, 201, 202, 203, 204, 206, 207, 208, 209, 210, 211, 212, 213, 214, 220, 221, 224, 226, 227, 228, 230, 231, 232, 233, 235, 237, 239, 241, 242, 243, 244, 245, 246, 252, 254, 255, 256, 258, 260, 261, 263, 264, 265, 266, 267, 271, 272, 273, 274, 275, 276, 277, 278, 279, 281, 282, 283, 285, 286, 287, 290, 291, 292, 293, 299, 300, 301, 302, 303, 304, 306, 307, 308, 309, 310, 311, 313, 314, 315, 316, 317, 318, 319, 320, 321, 322, 323, 324, 325, 328, 329, 330, 331, 332, 333, 334, 336, 337, 338, 339, 341, 343, 344, 345, 346, 347, 348, 349, 350, 351, 352, 354, 355, 356, 357, 358, 359, 360, 362, 363, 364, 365, 368, 369, 370, 373, 374, 375, 376, 377, 378, 379, 381, 384, 385, 386, 387, 389, 390, 393, 394, 397, 398, 399, 400, 401, 402, 405, 406, 408, 409, 410, 411, 412, 414, 416, 417, 418, 419, 423, 424, 426, 428, 430, 431]
 
-        # # 4) Handle timestamps safely
-        # timestamps = torch.stack(self.hf_dataset["timestamp"]).numpy()
-        # episode_indices = torch.stack(self.hf_dataset["episode_index"]).numpy()
+        # holdout_tasks_5_6_7_8_9
+        # manual_ids = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 21, 23, 27, 30, 31, 37, 39, 40, 41, 43, 47, 48, 50, 52, 53, 64, 66, 68, 69, 72, 73, 75, 76, 77, 78, 79, 80, 82, 83, 86, 88, 91, 98, 99, 101, 103, 104, 107, 108, 110, 112, 113, 118, 120, 121, 123, 127, 128, 133, 134, 135, 136, 137, 140, 143, 146, 149, 154, 155, 157, 159, 160, 161, 162, 163, 164, 168, 169, 172, 173, 180, 182, 185, 187, 188, 189, 192, 195, 200, 201, 204, 208, 209, 211, 212, 213, 220, 221, 224, 230, 231, 232, 233, 235, 237, 239, 241, 243, 244, 245, 255, 256, 258, 260, 263, 264, 265, 266, 271, 273, 276, 277, 278, 282, 283, 290, 292, 299, 300, 301, 302, 303, 306, 307, 310, 313, 314, 315, 316, 318, 320, 321, 322, 324, 325, 328, 329, 330, 332, 333, 334, 336, 337, 341, 343, 344, 345, 346, 350, 351, 352, 354, 355, 356, 358, 359, 363, 364, 365, 370, 373, 374, 375, 376, 379, 381, 384, 385, 386, 390, 393, 394, 399, 400, 402, 405, 406, 408, 411, 412, 414, 416, 418, 419, 423, 424, 426, 428, 430, 431]
 
-        # ep_data_index_np = {
-        #     "from": {k: v.numpy() for k, v in self.episode_data_index["from"].items()},
-        #     "to":   {k: v.numpy() for k, v in self.episode_data_index["to"].items()},
-        # }
+        # holdout_tasks_2_to_9
+        # manual_ids = [0, 13, 16, 30, 31, 40, 43, 48, 53, 68, 72, 75, 76, 77, 79, 110, 113, 154, 155, 157, 160, 168, 185, 187, 195, 211, 212, 224, 241, 265, 273, 278, 283, 303, 314, 343, 345, 346, 350, 351, 352, 363, 384, 394, 400, 405]
 
-        # # Only run timestamp sync check if full coverage
-        # if len(self.episodes) < getattr(self.meta, "total_episodes", len(self.episodes)):
-        #     print(f"[lerobot_dataset] Skipping timestamp sync check ({len(self.episodes)} / {getattr(self.meta, 'total_episodes', len(self.episodes))} episodes).")
-        # else:
-        #     check_timestamps_sync(timestamps, episode_indices, ep_data_index_np, self.fps, self.tolerance_s)
-        # # --- PATCH END ---
+        # Otherwise automatically take the first N available episodes
+        if manual_ids:
+            requested_ids = manual_ids
+        else:
+            requested_ids = sorted(list(self.meta.episodes.keys()))[:N_EPISODES]
+        
+        print(f"[lerobot_dataset] Requested episode IDs: {requested_ids}")
+        
+        # 1) Keep only requested episodes (retain global indices)
+        valid_ids = [i for i in requested_ids if i in self.meta.episodes]
+        self.meta.episodes = {i: self.meta.episodes[i] for i in valid_ids}
+        self.episodes = valid_ids
+        print(f"[lerobot_dataset] Filtered {len(valid_ids)} episodes -> global IDs {self.episodes}")
+        
+        # 2) Filter hf_dataset rows to only include these episodes
+        mask = [int(e.item()) in valid_ids for e in self.hf_dataset["episode_index"]]
+        self.hf_dataset = self.hf_dataset.select([i for i, keep in enumerate(mask) if keep])
+        print(f"[lerobot_dataset] Selected {len(self.hf_dataset)} frames across {len(valid_ids)} episodes.")
+        
+        # 3) Build episode_data_index in correct structure
+        episode_indices = np.array(self.hf_dataset["episode_index"], dtype=np.int64)
+        from_map, to_map = {}, {}
+        
+        for ep_id in self.episodes:
+            idxs = np.where(episode_indices == ep_id)[0]
+            if len(idxs) == 0:
+                continue
+            from_map[ep_id] = torch.tensor([idxs[0]], dtype=torch.int64)
+            to_map[ep_id]   = torch.tensor([idxs[-1]], dtype=torch.int64)
 
+        self.episode_data_index = {"from": from_map, "to": to_map}
+        print("[lerobot_dataset] Rebuilt episode_data_index for filtered subset.")
 
-
-        #UNCOMMENT NORMALLY
+        # 4) Handle timestamps safely
         timestamps = torch.stack(self.hf_dataset["timestamp"]).numpy()
         episode_indices = torch.stack(self.hf_dataset["episode_index"]).numpy()
 
         ep_data_index_np = {
-            "from": self.episode_data_index["from"].numpy(),
-            "to": self.episode_data_index["to"].numpy(),
+            "from": {k: v.numpy() for k, v in self.episode_data_index["from"].items()},
+            "to":   {k: v.numpy() for k, v in self.episode_data_index["to"].items()},
         }
-        check_timestamps_sync(timestamps, episode_indices, ep_data_index_np, self.fps, self.tolerance_s)
+
+        # Only run timestamp sync check if full coverage
+        if len(self.episodes) < getattr(self.meta, "total_episodes", len(self.episodes)):
+            print(f"[lerobot_dataset] Skipping timestamp sync check ({len(self.episodes)} / {getattr(self.meta, 'total_episodes', len(self.episodes))} episodes).")
+        else:
+            check_timestamps_sync(timestamps, episode_indices, ep_data_index_np, self.fps, self.tolerance_s)
+        # --- PATCH END ---
+
+
+
+        # #UNCOMMENT NORMALLY
+        # timestamps = torch.stack(self.hf_dataset["timestamp"]).numpy()
+        # episode_indices = torch.stack(self.hf_dataset["episode_index"]).numpy()
+
+        # ep_data_index_np = {
+        #     "from": self.episode_data_index["from"].numpy(),
+        #     "to": self.episode_data_index["to"].numpy(),
+        # }
+        # check_timestamps_sync(timestamps, episode_indices, ep_data_index_np, self.fps, self.tolerance_s)
 
 
         # Setup delta_indices
