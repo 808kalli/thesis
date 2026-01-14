@@ -59,6 +59,7 @@ class ExtractConfig:
     batch_size: int = 16
     shuffle_buffer_size: int = 100_000
     num_workers: int = 0
+    max_batches: int = 5000  # Maximum number of batches to extract (set to 0 for full dataset)
 
     # Output Parameters
     output_dir: Path = Path("runs/hidden_states_extraction")
@@ -179,7 +180,10 @@ def extract_hidden_states(cfg: ExtractConfig) -> None:
 
     if distributed_state.is_main_process:
         print(f"✓ Dataset loaded: {len(vla_dataset)} samples")
-        print(f"✓ Batches per epoch: {len(dataloader)}")
+        total_batches = len(dataloader)
+        batches_to_extract = cfg.max_batches if cfg.max_batches > 0 else total_batches
+        print(f"✓ Total batches available: {total_batches}")
+        print(f"✓ Batches to extract: {batches_to_extract}")
 
     # Extract hidden states
     if distributed_state.is_main_process:
@@ -191,8 +195,15 @@ def extract_hidden_states(cfg: ExtractConfig) -> None:
         for batch_idx, batch in enumerate(tqdm.tqdm(
             dataloader,
             desc="Extracting hidden states",
-            disable=not distributed_state.is_main_process
+            disable=not distributed_state.is_main_process,
+            total=cfg.max_batches if cfg.max_batches > 0 else len(dataloader)
         )):
+            # Check if we've reached max_batches
+            if cfg.max_batches > 0 and batch_idx >= cfg.max_batches:
+                if distributed_state.is_main_process:
+                    print(f"\nReached max_batches limit ({cfg.max_batches}). Stopping extraction.")
+                break
+
             # Move batch to device
             input_ids = batch["input_ids"].to(device_id)
             attention_mask = batch["attention_mask"].to(device_id)
@@ -232,13 +243,14 @@ def extract_hidden_states(cfg: ExtractConfig) -> None:
 
             # Print progress every 100 batches
             if distributed_state.is_main_process and (batch_idx + 1) % 100 == 0:
-                print(f"Saved batch {batch_idx + 1}/{len(dataloader)}")
+                print(f"Saved batch {batch_idx + 1}/{cfg.max_batches if cfg.max_batches > 0 else len(dataloader)}")
 
     if distributed_state.is_main_process:
         print("\n" + "=" * 80)
         print("✓ Hidden State Extraction Complete")
         print("=" * 80)
-        print(f"Total batches saved: {batch_idx + 1}")
+        actual_batches = min(batch_idx + 1, cfg.max_batches if cfg.max_batches > 0 else batch_idx + 1)
+        print(f"Total batches saved: {actual_batches}")
         print(f"Output directory: {output_dir}")
         print("=" * 80)
 
