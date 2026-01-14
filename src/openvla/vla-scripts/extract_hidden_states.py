@@ -95,32 +95,23 @@ def extract_hidden_states(cfg: ExtractConfig) -> None:
         print(f"Output Directory: {cfg.output_dir}")
         print("=" * 80)
 
+    # Determine which checkpoint to load
+    model_path = cfg.load_from_checkpoint if cfg.load_from_checkpoint is not None else cfg.pretrained_checkpoint
+
     # Load VLA model
     if distributed_state.is_main_process:
-        print(f"\nLoading VLA model from {cfg.pretrained_checkpoint}...")
+        model_type = "distilled" if cfg.load_from_checkpoint is not None else "vanilla"
+        print(f"\nLoading {model_type} VLA model from {model_path}...")
 
     vla = AutoModelForVision2Seq.from_pretrained(
-        cfg.pretrained_checkpoint,
+        model_path,
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
         trust_remote_code=True,
     )
 
-    # Load distilled checkpoint if specified
-    if cfg.load_from_checkpoint is not None:
-        if distributed_state.is_main_process:
-            print(f"Loading distilled weights from {cfg.load_from_checkpoint}...")
-
-        # The checkpoint directory contains the merged model (LoRA already integrated)
-        vla = AutoModelForVision2Seq.from_pretrained(
-            cfg.load_from_checkpoint,
-            torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True,
-            trust_remote_code=True,
-        )
-
-        if distributed_state.is_main_process:
-            print("✓ Loaded distilled weights (merged model)")
+    if distributed_state.is_main_process:
+        print("✓ Model loaded")
 
     vla = vla.to(device_id)
 
@@ -133,9 +124,9 @@ def extract_hidden_states(cfg: ExtractConfig) -> None:
     if distributed_state.is_main_process:
         print("✓ Model loaded and frozen")
 
-    # Load processor
+    # Load processor (from the same checkpoint as the model)
     processor = AutoProcessor.from_pretrained(
-        cfg.pretrained_checkpoint, trust_remote_code=True
+        model_path, trust_remote_code=True
     )
 
     # Create Action Tokenizer (same as training)
