@@ -660,7 +660,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             teacher_hidden_aggregated = torch.stack(teacher_hidden_aggregated_list).to(device_id)
 
             # Log UNPROJECTED aggregated hidden states for first 100 batches (aggregation only, no MLP)
-            if batch_idx < 1000:
+            if batch_idx < 100:
                 # Use aggregate_only() to get unprojected states [batch, 4096]
                 student_hidden_unprojected = sequence_aggregation_student.aggregate_only(student_hidden_states_full)
                 log_file = hidden_state_dir / f"batch_{batch_idx:04d}.npz"
