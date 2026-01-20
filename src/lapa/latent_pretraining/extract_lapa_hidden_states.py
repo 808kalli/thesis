@@ -92,6 +92,20 @@ LIBERO_SPATIAL_TASKS = [
     "pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate",
 ]
 
+# Task descriptions mapped from task_index (libero_object suite)
+LIBERO_OBJECT_TASKS = [
+    "pick_up_the_alphabet_soup_and_place_it_in_the_basket",
+    "pick_up_the_cream_cheese_and_place_it_in_the_basket",
+    "pick_up_the_salad_dressing_and_place_it_in_the_basket",
+    "pick_up_the_bbq_sauce_and_place_it_in_the_basket",
+    "pick_up_the_ketchup_and_place_it_in_the_basket",
+    "pick_up_the_tomato_sauce_and_place_it_in_the_basket",
+    "pick_up_the_butter_and_place_it_in_the_basket",
+    "pick_up_the_milk_and_place_it_in_the_basket",
+    "pick_up_the_chocolate_pudding_and_place_it_in_the_basket",
+    "pick_up_the_orange_juice_and_place_it_in_the_basket",
+]
+
 
 class FLAGSClass:
     """Simple flags container matching inference.py pattern"""
@@ -129,8 +143,10 @@ class ExtractLAPAConfig:
     num_episodes: Optional[int] = None  # If set, only process first N episodes
     episode_start: Optional[int] = None  # First episode to process (0-indexed, None = start from 0)
     episode_end: Optional[int] = None  # Last episode to process (0-indexed inclusive, None = process all)
+    episode_list: Optional[str] = None  # Comma-separated list of specific episodes to process (e.g., "0,10,20")
     aggregation_method: str = "mean"  # How to aggregate: "last" (last token) or "mean" (mean of all)
     frame_stride: int = 1  # Process every Nth frame (stride=1 for all, stride=2 for every 2nd, etc.)
+    suite: str = "spatial"  # LIBERO suite: "spatial" or "object"
 
     # Output parameters
     output_dir: Union[str, Path] = "lapa_hidden_states"
@@ -466,9 +482,14 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
 
     episode_list = sorted(episodes_metadata.items())
 
-    # Apply episode range filtering
-    if cfg.num_episodes is not None:
-        # num_episodes takes precedence: process first N episodes
+    # Apply episode filtering
+    if cfg.episode_list is not None:
+        # episode_list takes highest precedence: process only specified episodes
+        specified_episodes = [int(ep.strip()) for ep in cfg.episode_list.split(',')]
+        episode_list = [(ep_idx, ep_meta) for ep_idx, ep_meta in episode_list if ep_idx in specified_episodes]
+        print(f"Using episode list: {specified_episodes}")
+    elif cfg.num_episodes is not None:
+        # num_episodes: process first N episodes
         episode_list = episode_list[:cfg.num_episodes]
     else:
         # Use episode_start and episode_end for range selection
@@ -498,8 +519,14 @@ def extract_lapa_hidden_states(cfg: ExtractLAPAConfig) -> None:
         task_index = episode_meta['task_index']
         max_frame_idx = episode_meta['max_frame_idx']
 
-        if task_index < len(LIBERO_SPATIAL_TASKS):
-            task_description = LIBERO_SPATIAL_TASKS[task_index]
+        # Select task list based on suite
+        if cfg.suite.lower() == "object":
+            task_list = LIBERO_OBJECT_TASKS
+        else:
+            task_list = LIBERO_SPATIAL_TASKS
+
+        if task_index < len(task_list):
+            task_description = task_list[task_index]
         else:
             task_description = 'unknown'
 
