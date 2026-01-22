@@ -227,6 +227,9 @@ class FinetuneConfig:
     distill_weight_decay_end_step: int = 12_000                     # Step at which decay should reach final value
     distill_weight_decay_final_ratio: float = 0.1                   # Final weight as ratio of initial weight (0.1 = 10x reduction)
 
+    # LIBERO Object Dataset Flag
+    object: bool = False                                            # Use LIBERO Object dataset (enables index mapping for non-contiguous indices)
+
     # Tracking Parameters
     wandb_project: str = "openvla"                                  # Name of W&B project to log to (use default!)
     wandb_entity: str = "eliaskallioras"                            # Name of entity to log under
@@ -509,6 +512,14 @@ def finetune(cfg: FinetuneConfig) -> None:
         np.array(teacher_dataset_file["hidden_states"][:], dtype=np.float32)
     )
 
+    # For LIBERO Object: create mapping from global_index value -> array position
+    # (handles non-contiguous indices when using subset of episodes)
+    teacher_index_to_pos = None
+    if cfg.object:
+        teacher_index_to_pos = {int(idx): pos for pos, idx in enumerate(teacher_global_indices)}
+        if distributed_state.is_main_process:
+            print(f"  Created index mapping for {len(teacher_index_to_pos)} indices (object mode)")
+
     # Note: No aggregation needed for teacher - already in precomputed dataset
     aggregation_enum = AggregationMethod(cfg.aggregation_method)
 
@@ -653,8 +664,13 @@ def finetune(cfg: FinetuneConfig) -> None:
             teacher_hidden_aggregated_list = []
 
             for global_idx in global_indices:
-                # Direct indexing since global_idx is sequential (0, 1, 2, ...)
-                teacher_state = teacher_hidden_states[int(global_idx)]
+                if teacher_index_to_pos is not None:
+                    # Object mode: use mapping for non-contiguous indices
+                    pos = teacher_index_to_pos[int(global_idx)]
+                    teacher_state = teacher_hidden_states[pos]
+                else:
+                    # Spatial mode: direct indexing since global_idx is sequential (0, 1, 2, ...)
+                    teacher_state = teacher_hidden_states[int(global_idx)]
                 teacher_hidden_aggregated_list.append(teacher_state)
 
             teacher_hidden_aggregated = torch.stack(teacher_hidden_aggregated_list).to(device_id)
