@@ -156,7 +156,7 @@ def extract_hidden_states(cfg: ExtractConfig) -> None:
         cfg.dataset_name,
         batch_transform,
         resize_resolution=tuple(vla.config.image_sizes),
-        shuffle_buffer_size=cfg.shuffle_buffer_size,
+        shuffle_buffer_size=1,  # No shuffling - sequential pass for complete extraction
         image_aug=cfg.image_aug,
     )
 
