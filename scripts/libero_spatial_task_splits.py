@@ -105,22 +105,26 @@ def main():
     print("=" * 80)
     print()
 
-    # Define split configurations
+    # Define split configurations - hold out last N tasks
     splits = {
-        'holdout_task_9': {
+        'holdout_1_task': {
             'description': 'Hold out 1 task (task 9) for zero-shot evaluation',
             'held_out_tasks': [9],
         },
-        'holdout_tasks_7_8_9': {
+        'holdout_3_tasks': {
             'description': 'Hold out 3 tasks (7,8,9) for zero-shot evaluation',
             'held_out_tasks': [7, 8, 9],
         },
-        'holdout_tasks_5_6_7_8_9': {
-            'description': 'Hold out 5 tasks (5,6,7,8,9) for few-shot evaluation',
+        'holdout_5_tasks': {
+            'description': 'Hold out 5 tasks (5,6,7,8,9) for zero-shot evaluation',
             'held_out_tasks': [5, 6, 7, 8, 9],
         },
-        'holdout_tasks_1_to_9': {
-            'description': 'Hold out 9 tasks (1-9) - extreme few-shot (only 1 training task)',
+        'holdout_7_tasks': {
+            'description': 'Hold out 7 tasks (3,4,5,6,7,8,9) for zero-shot evaluation',
+            'held_out_tasks': [3, 4, 5, 6, 7, 8, 9],
+        },
+        'holdout_9_tasks': {
+            'description': 'Hold out 9 tasks (1-9) - extreme zero-shot (only 1 training task)',
             'held_out_tasks': list(range(1, 10)),
         },
     }
@@ -177,10 +181,11 @@ with open('scripts/libero_spatial_task_splits.json') as f:
     splits = json.load(f)
 
 # Choose which split to use
-manual_ids = splits['holdout_task_9']['train_episodes']
-# OR: manual_ids = splits['holdout_tasks_7_8_9']['train_episodes']
-# OR: manual_ids = splits['holdout_tasks_5_6_7_8_9']['train_episodes']
-# OR: manual_ids = splits['holdout_tasks_1_to_9']['train_episodes']
+manual_ids = splits['holdout_1_task']['train_episodes']  # 9 training tasks
+# OR: manual_ids = splits['holdout_3_tasks']['train_episodes']  # 7 training tasks
+# OR: manual_ids = splits['holdout_5_tasks']['train_episodes']  # 5 training tasks
+# OR: manual_ids = splits['holdout_7_tasks']['train_episodes']  # 3 training tasks
+# OR: manual_ids = splits['holdout_9_tasks']['train_episodes']  # 1 training task
 """)
     print("=" * 80)
 
