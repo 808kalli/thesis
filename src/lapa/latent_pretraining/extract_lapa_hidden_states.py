@@ -371,12 +371,17 @@ class LAPAHiddenStateExtractor:
             )
 
 
-        # STEP 5: Extract all hidden states from final layer (text + vision + continuation)
+        # STEP 5: Extract UNNORMALIZED hidden states from final layer (text + vision + continuation)
+        # IMPORTANT: We extract hidden_states[-2] which is the output BEFORE the final RMSNorm (ln_f)
+        # After modifying delta_llama.py, the hidden_states tuple now contains:
+        #   - hidden_states[:-2] = intermediate transformer layers
+        #   - hidden_states[-2] = final layer BEFORE RMSNorm (UNNORMALIZED)
+        #   - hidden_states[-1] = final layer AFTER RMSNorm (NORMALIZED)
         if hasattr(outputs, 'hidden_states') and outputs.hidden_states is not None:
-            # outputs.hidden_states[-1] = final transformer layer
+            # outputs.hidden_states[-2] = final transformer layer BEFORE RMSNorm
             # Shape: [batch=1, seq_len=text+vision+continuation, hidden_dim=4096]
             # Extract entire sequence including text and vision tokens for richer representations
-            hidden_states = outputs.hidden_states[-1][0, :, :]
+            hidden_states = outputs.hidden_states[-2][0, :, :]
         else:
             raise RuntimeError(
                 "Hidden states not in model output. Verify output_hidden_states=True."
