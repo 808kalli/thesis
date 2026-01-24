@@ -26,7 +26,7 @@ from tqdm import tqdm
 import argparse
 
 # Paths
-LAPA_H5 = Path("/home/elias/Thesis/lapa_hidden_states/lapa_mean_hidden_states_eps0-431_stride1.h5")
+LAPA_H5 = Path("/home/elias/Thesis/lapa_hidden_states/lapa_hidden_states_eps0-50_stride1.h5")
 DISTILLED_DIR = Path("/home/elias/Thesis/lapa_hidden_states/distilled")
 VANILLA_DIR = Path("/home/elias/Thesis/lapa_hidden_states/vanilla")
 BEFORE_TRAINING_DIR = Path("/home/elias/Thesis/lapa_hidden_states/before_training")
