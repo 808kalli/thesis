@@ -25,25 +25,6 @@ from sklearn.decomposition import PCA
 from tqdm import tqdm
 import argparse
 
-
-def rms_normalize(hidden_states, eps=1e-8):
-    """
-    Apply RMSNorm to hidden states.
-
-    Args:
-        hidden_states: [N, D] array of hidden states
-        eps: Small epsilon for numerical stability
-
-    Returns:
-        Normalized hidden states with same shape
-    """
-    # Compute RMS per sample (along feature dimension)
-    rms = np.sqrt(np.mean(hidden_states ** 2, axis=1, keepdims=True))
-    # Normalize by RMS
-    normalized = hidden_states / (rms + eps)
-    return normalized
-
-
 # Paths
 LAPA_H5 = Path("/home/elias/Thesis/lapa_hidden_states/lapa_mean_hidden_states_eps0-431_stride1.h5")
 DISTILLED_DIR = Path("/home/elias/Thesis/lapa_hidden_states/distilled")
@@ -317,23 +298,6 @@ def main():
     print(f"\nFinal aligned dataset:")
     print(f"  Shape: {lapa_hidden.shape}")
     print(f"  Total samples: {len(common_indices)}")
-
-    # Apply RMSNorm to all distributions EXCEPT LAPA teacher (already normalized)
-    print("\nApplying RMSNorm to student distributions...")
-    print(f"  Distilled - before norm: mean={distilled_hidden.mean():.2f}, std={distilled_hidden.std():.2f}")
-    print(f"  Vanilla - before norm: mean={vanilla_hidden.mean():.2f}, std={vanilla_hidden.std():.2f}")
-    print(f"  Before Training - before norm: mean={before_training_hidden.mean():.2f}, std={before_training_hidden.std():.2f}")
-    print(f"  LAPA (teacher) - already normalized: mean={lapa_hidden.mean():.2f}, std={lapa_hidden.std():.2f}")
-
-    distilled_hidden = rms_normalize(distilled_hidden)
-    vanilla_hidden = rms_normalize(vanilla_hidden)
-    before_training_hidden = rms_normalize(before_training_hidden)
-
-    print(f"\nAfter RMSNorm:")
-    print(f"  Distilled - after norm: mean={distilled_hidden.mean():.2f}, std={distilled_hidden.std():.2f}")
-    print(f"  Vanilla - after norm: mean={vanilla_hidden.mean():.2f}, std={vanilla_hidden.std():.2f}")
-    print(f"  Before Training - after norm: mean={before_training_hidden.mean():.2f}, std={before_training_hidden.std():.2f}")
-    print(f"  LAPA (teacher) - unchanged: mean={lapa_hidden.mean():.2f}, std={lapa_hidden.std():.2f}")
 
     # Create visualizations based on flag
     plots_generated = []
