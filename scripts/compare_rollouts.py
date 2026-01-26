@@ -27,19 +27,37 @@ class RolloutComparer:
         self.distilled_dir = Path(distilled_dir)
         self.vanilla_dir = Path(vanilla_dir)
 
-        # Get sorted lists of videos (sorted by episode number, not lexicographically)
-        distilled_videos_unsorted = glob.glob(str(self.distilled_dir / "*.mp4"))
-        vanilla_videos_unsorted = glob.glob(str(self.vanilla_dir / "*.mp4"))
+        # Get all videos from both directories
+        distilled_files = glob.glob(str(self.distilled_dir / "*.mp4"))
+        vanilla_files = glob.glob(str(self.vanilla_dir / "*.mp4"))
 
-        # Sort by episode number extracted from filename
-        self.distilled_videos = sorted(distilled_videos_unsorted, key=self._get_episode_from_filename)
-        self.vanilla_videos = sorted(vanilla_videos_unsorted, key=self._get_episode_from_filename)
+        # Build dictionaries mapping episode number to video path
+        self.distilled_dict = {}
+        for video in distilled_files:
+            ep_num = self.extract_episode_number(video)
+            if ep_num is not None:
+                self.distilled_dict[ep_num] = video
 
-        print(f"Found {len(self.distilled_videos)} distilled videos")
-        print(f"Found {len(self.vanilla_videos)} vanilla videos")
+        self.vanilla_dict = {}
+        for video in vanilla_files:
+            ep_num = self.extract_episode_number(video)
+            if ep_num is not None:
+                self.vanilla_dict[ep_num] = video
 
-        if not self.distilled_videos or not self.vanilla_videos:
-            raise ValueError("No videos found in one or both directories")
+        # Find common episode numbers
+        common_episodes = sorted(set(self.distilled_dict.keys()) & set(self.vanilla_dict.keys()))
+
+        if not common_episodes:
+            raise ValueError(f"No matching episodes found between directories.\n"
+                           f"Distilled episodes: {sorted(self.distilled_dict.keys())[:10]}...\n"
+                           f"Vanilla episodes: {sorted(self.vanilla_dict.keys())[:10]}...")
+
+        # Create paired video list based on common episodes
+        self.video_pairs = [(self.distilled_dict[ep], self.vanilla_dict[ep]) for ep in common_episodes]
+
+        print(f"Found {len(self.distilled_dict)} distilled videos")
+        print(f"Found {len(self.vanilla_dict)} vanilla videos")
+        print(f"Matched {len(self.video_pairs)} common episodes")
 
         # Build task description to ID mapping
         self.task_to_id = self._build_task_mapping()
@@ -70,7 +88,7 @@ class RolloutComparer:
     def _build_task_mapping(self):
         """Build mapping of task descriptions to task IDs (1-10)."""
         task_descriptions = set()
-        for video in self.distilled_videos:
+        for video in self.distilled_dict.values():
             basename = os.path.basename(video)
             task_match = re.search(r'task=(.+?)\.mp4', basename)
             if task_match:
@@ -95,15 +113,10 @@ class RolloutComparer:
             return None
 
     def find_matching_videos(self, index):
-        """Find matching videos at the same index (both sorted identically by task and episode)."""
-        distilled_video = self.distilled_videos[index]
-
-        # Both lists are sorted the same way (by task, then episode), so use same index
-        if index < len(self.vanilla_videos):
-            vanilla_video = self.vanilla_videos[index]
-            return distilled_video, vanilla_video
-
-        return distilled_video, None
+        """Get the video pair at the given index."""
+        if index < len(self.video_pairs):
+            return self.video_pairs[index]
+        return None, None
 
     def get_video_info(self, video_path):
         """Get video information."""
@@ -113,30 +126,20 @@ class RolloutComparer:
         success_match = re.search(r'success=(True|False)--', basename)
         success = success_match.group(1) if success_match else "?"
 
-        # Extract task description (between task= and .mp4)
-        task_match = re.search(r'task=(.+?)\.mp4', basename)
-        task_desc = task_match.group(1) if task_match else ""
+        # Extract global episode number
+        episode_match = re.search(r'episode=(\d+)--', basename)
+        if episode_match:
+            global_episode = int(episode_match.group(1))
+            # Calculate task ID (0-indexed task, then convert to 1-indexed)
+            # Each task has 50 episodes: episodes 0-49 = task 0, 50-99 = task 1, etc.
+            task_id = (global_episode // 50) + 1  # 1-indexed task ID
+            # Calculate local episode within task (1-indexed)
+            local_episode = (global_episode % 50) + 1  # 1-indexed episode within task
+        else:
+            task_id = "?"
+            local_episode = "?"
 
-        # Map task description to task ID (1-indexed based on LIBERO canonical order)
-        task_id = self.get_task_id(task_desc)
-
-        # Calculate local episode number (1-20) within the task
-        # Filter videos by exact task match
-        task_videos = []
-        for v in self.distilled_videos:
-            v_basename = os.path.basename(v)
-            v_task_match = re.search(r'task=(.+?)\.mp4', v_basename)
-            if v_task_match and v_task_match.group(1) == task_desc:
-                task_videos.append(v)
-
-        # Find this video's position within its task
-        local_episode = 1
-        for idx, video in enumerate(task_videos, 1):
-            if os.path.basename(video) == basename:
-                local_episode = idx
-                break
-
-        return str(local_episode), success, task_id
+        return str(local_episode), success, str(task_id)
 
     def get_task_id(self, task_description):
         """Map task description to task ID using the pre-built mapping."""
@@ -195,14 +198,10 @@ class RolloutComparer:
                 # Combine frames side by side
                 combined = np.hstack([frame_distilled, frame_vanilla])
 
-                # Add top margin for title
+                # Add top margin for labels
                 title_height = 100
                 combined_with_title = np.ones((combined.shape[0] + title_height, combined.shape[1], 3), dtype=np.uint8) * 255
                 combined_with_title[title_height:, :] = combined
-
-                # Add shared title with episode and task at top
-                title_text = f"Task {distilled_task_id}, Ep {distilled_ep}"
-                cv2.putText(combined_with_title, title_text, (30, 65), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 0), 5)
 
                 # Colors based on success
                 distilled_color = (0, 255, 0) if distilled_success == "True" else (0, 0, 255)  # Green for success, red for failure
@@ -220,14 +219,10 @@ class RolloutComparer:
 
                 cv2.imshow(self.window_name, combined_with_title)
             else:
-                # Only distilled video, add title bar to it
+                # Only distilled video, add label bar to it
                 title_height = 100
                 combined_with_title = np.ones((frame_distilled.shape[0] + title_height, frame_distilled.shape[1], 3), dtype=np.uint8) * 255
                 combined_with_title[title_height:, :] = frame_distilled
-
-                # Add shared title
-                title_text = f"Task {distilled_task_id}, Ep {distilled_ep}"
-                cv2.putText(combined_with_title, title_text, (30, 65), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 0), 5)
 
                 # DISTILLED label and status
                 distilled_color = (0, 255, 0) if distilled_success == "True" else (0, 0, 255)
@@ -252,7 +247,7 @@ class RolloutComparer:
                 if cap_vanilla:
                     cap_vanilla.release()
 
-                if self.current_index < len(self.distilled_videos) - 1:
+                if self.current_index < len(self.video_pairs) - 1:
                     self.current_index += 1
                     return True
                 else:
