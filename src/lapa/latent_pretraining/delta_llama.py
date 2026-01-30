@@ -355,13 +355,11 @@ class FlaxVideoLLaMAModule(nn.Module):
             return_dict=return_dict,
         )
 
-        hidden_states_prenorm = outputs[0]  # Save pre-norm state
-        hidden_states = self.ln_f(hidden_states_prenorm)
+        hidden_states = outputs[0]
+        hidden_states = self.ln_f(hidden_states)
 
         if output_hidden_states:
-            # Append BOTH pre-norm and post-norm states
-            # [-2] will be pre-norm (unnormalized), [-1] will be post-norm (normalized)
-            all_hidden_states = outputs[1] + (hidden_states_prenorm, hidden_states)
+            all_hidden_states = outputs[1] + (hidden_states,)
             outputs = (hidden_states, all_hidden_states) + outputs[2:]
         else:
             outputs = (hidden_states,) + outputs[1:]

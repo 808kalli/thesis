@@ -187,9 +187,9 @@ def plot_pca_histograms(lapa_hidden, distilled_hidden, vanilla_hidden, output_di
     # === Plot 1: KDE curves (true density) ===
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    ax.plot(x, y_vanilla, color='gray', linewidth=2,
+    ax.plot(x, y_vanilla, color='green', linewidth=2,
             label=f'Vanilla (μ={vanilla_pca.mean():.1f}, σ={vanilla_pca.std():.1f})')
-    ax.fill_between(x, y_vanilla, alpha=0.3, color='gray')
+    ax.fill_between(x, y_vanilla, alpha=0.3, color='green')
 
     ax.plot(x, y_lapa, color='blue', linewidth=2,
             label=f'Teacher (μ={lapa_pca.mean():.1f}, σ={lapa_pca.std():.1f})')

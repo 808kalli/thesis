@@ -6,6 +6,7 @@ Displays videos from two training pipelines (distilled vs vanilla) side-by-side.
 Navigate between episodes using arrow keys:
   - Right arrow: Next video pair
   - Left arrow: Previous video pair
+  - Space: Pause/Resume playback
   - q or Esc: Quit
 
 Usage:
@@ -63,7 +64,7 @@ class RolloutComparer:
         self.task_to_id = self._build_task_mapping()
 
         self.current_index = 0
-        self.window_name = "Rollout Comparison (Distilled | Vanilla) - Press LEFT/RIGHT arrow to navigate, Q to quit"
+        self.window_name = "Rollout Comparison (Distilled | Vanilla) - LEFT/RIGHT to navigate, SPACE to pause, Q to quit"
 
         # Create window
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
@@ -176,61 +177,55 @@ class RolloutComparer:
         # Play videos
         paused = False
         while True:
-            ret_distilled, frame_distilled = cap_distilled.read()
-            ret_vanilla = cap_vanilla.read() if cap_vanilla else (None, None)
-            ret_vanilla, frame_vanilla = ret_vanilla
+            if not paused:
+                ret_distilled, frame_distilled = cap_distilled.read()
+                ret_vanilla = cap_vanilla.read() if cap_vanilla else (None, None)
+                ret_vanilla, frame_vanilla = ret_vanilla
 
-            # Stop if either video ends
-            if not ret_distilled or (cap_vanilla and not ret_vanilla):
-                break
+                # Stop if either video ends
+                if not ret_distilled or (cap_vanilla and not ret_vanilla):
+                    break
 
-            # Resize frames to same height for side-by-side display (doubled size)
-            target_height = 1440
-            scale_distilled = target_height / height_distilled
-            new_width_distilled = int(width_distilled * scale_distilled)
-            frame_distilled = cv2.resize(frame_distilled, (new_width_distilled, target_height))
+                # Resize frames to same height for side-by-side display (doubled size)
+                target_height = 1440
+                scale_distilled = target_height / height_distilled
+                new_width_distilled = int(width_distilled * scale_distilled)
+                frame_distilled_resized = cv2.resize(frame_distilled, (new_width_distilled, target_height))
 
-            if frame_vanilla is not None:
-                scale_vanilla = target_height / height_vanilla
-                new_width_vanilla = int(width_vanilla * scale_vanilla)
-                frame_vanilla = cv2.resize(frame_vanilla, (new_width_vanilla, target_height))
+                if frame_vanilla is not None:
+                    scale_vanilla = target_height / height_vanilla
+                    new_width_vanilla = int(width_vanilla * scale_vanilla)
+                    frame_vanilla_resized = cv2.resize(frame_vanilla, (new_width_vanilla, target_height))
 
-                # Combine frames side by side
-                combined = np.hstack([frame_distilled, frame_vanilla])
+                    # Combine frames side by side
+                    combined = np.hstack([frame_distilled_resized, frame_vanilla_resized])
 
-                # Add top margin for labels
-                title_height = 100
-                combined_with_title = np.ones((combined.shape[0] + title_height, combined.shape[1], 3), dtype=np.uint8) * 255
-                combined_with_title[title_height:, :] = combined
+                    # Add top margin for labels
+                    title_height = 100
+                    combined_with_title = np.ones((combined.shape[0] + title_height, combined.shape[1], 3), dtype=np.uint8) * 255
+                    combined_with_title[title_height:, :] = combined
 
-                # Colors based on success
-                distilled_color = (0, 255, 0) if distilled_success == "True" else (0, 0, 255)  # Green for success, red for failure
-                vanilla_color = (0, 255, 0) if vanilla_success == "True" else (0, 0, 255)
+                    # DISTILLED label (left side) - white color
+                    cv2.putText(combined_with_title, "DISTILLED", (60, 70), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 0), 5)
 
-                # DISTILLED label and status (left side)
-                cv2.putText(combined_with_title, "DISTILLED", (60, title_height + 80), cv2.FONT_HERSHEY_SIMPLEX, 2.0, distilled_color, 5)
-                status_text = "SUCCESS" if distilled_success == "True" else "FAIL"
-                cv2.putText(combined_with_title, status_text, (60, title_height + 160), cv2.FONT_HERSHEY_SIMPLEX, 2.0, distilled_color, 5)
+                    # VANILLA label (right side) - white color
+                    cv2.putText(combined_with_title, "VANILLA", (new_width_distilled + 60, 70), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 0), 5)
 
-                # VANILLA label and status (right side)
-                cv2.putText(combined_with_title, "VANILLA", (new_width_distilled + 60, title_height + 80), cv2.FONT_HERSHEY_SIMPLEX, 2.0, vanilla_color, 5)
-                status_text = "SUCCESS" if vanilla_success == "True" else "FAIL"
-                cv2.putText(combined_with_title, status_text, (new_width_distilled + 60, title_height + 160), cv2.FONT_HERSHEY_SIMPLEX, 2.0, vanilla_color, 5)
+                    # Store for redisplay when paused
+                    self.last_frame = combined_with_title
+                else:
+                    # Only distilled video, add label bar to it
+                    title_height = 100
+                    combined_with_title = np.ones((frame_distilled_resized.shape[0] + title_height, frame_distilled_resized.shape[1], 3), dtype=np.uint8) * 255
+                    combined_with_title[title_height:, :] = frame_distilled_resized
 
-                cv2.imshow(self.window_name, combined_with_title)
-            else:
-                # Only distilled video, add label bar to it
-                title_height = 100
-                combined_with_title = np.ones((frame_distilled.shape[0] + title_height, frame_distilled.shape[1], 3), dtype=np.uint8) * 255
-                combined_with_title[title_height:, :] = frame_distilled
+                    # DISTILLED label
+                    cv2.putText(combined_with_title, "DISTILLED", (60, 70), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 0), 5)
 
-                # DISTILLED label and status
-                distilled_color = (0, 255, 0) if distilled_success == "True" else (0, 0, 255)
-                cv2.putText(combined_with_title, "DISTILLED", (60, title_height + 80), cv2.FONT_HERSHEY_SIMPLEX, 2.0, distilled_color, 5)
-                status_text = "SUCCESS" if distilled_success == "True" else "FAIL"
-                cv2.putText(combined_with_title, status_text, (60, title_height + 160), cv2.FONT_HERSHEY_SIMPLEX, 2.0, distilled_color, 5)
+                    # Store for redisplay when paused
+                    self.last_frame = combined_with_title
 
-                cv2.imshow(self.window_name, combined_with_title)
+            cv2.imshow(self.window_name, self.last_frame)
 
             # Handle keyboard input
             key = cv2.waitKey(frame_delay) & 0xFF
@@ -241,6 +236,8 @@ class RolloutComparer:
                     cap_vanilla.release()
                 cv2.destroyWindow(self.window_name)
                 return False
+            elif key == ord(' '):  # Space bar - toggle pause
+                paused = not paused
             elif key == 83 or key == 2555904:  # Right arrow (83 or specific code depending on system)
                 # Move to next video
                 cap_distilled.release()

@@ -8,25 +8,25 @@ Compares GT, Model, and Vanilla Model data using either:
 Example usage:
     # Histogram mode - shows overlaid bar plots (3-way comparison, all tasks)
     python scripts/visualize_action_distibution.py \
-        --model_data_path /home/elias/Thesis/action_data/actions_libero_spatial_checkpoints_seed7.h5 \
-        --vanilla_data_path /home/elias/Thesis/action_data/actions_libero_spatial_checkpoints_seed7_vanilla.h5 \
+        --model_data_path /home/elias/Thesis/action_data/actions_libero_object_distilled.h5 \
+        --vanilla_data_path /home/elias/Thesis/action_data/actions_libero_object_vanilla.h5 \
         --num_episodes 100 \
         --mode histogram \
         --save_path action_histograms_3way.png
 
     # UMAP mode - shows end-effector pose distributions (3-way comparison, all tasks)
     python scripts/visualize_action_distibution.py \
-        --model_data_path /home/elias/Thesis/action_data/actions_libero_spatial_checkpoints_seed7.h5 \
-        --vanilla_data_path /home/elias/Thesis/action_data/actions_libero_spatial_checkpoints_seed7_vanilla.h5 \
+        --model_data_path /home/elias/Thesis/action_data/actions_libero_object_distilled.h5 \
+        --vanilla_data_path /home/elias/Thesis/action_data/actions_libero_object_vanilla.h5 \
         --num_episodes 100 \
         --mode umap \
         --save_path eef_umap_3way.png
 
     # Filter to only task 1 (single task visualization)
     python scripts/visualize_action_distibution.py \
-        --model_data_path /home/elias/Thesis/action_data/actions_libero_spatial_checkpoints_seed7.h5 \
-        --vanilla_data_path /home/elias/Thesis/action_data/actions_libero_spatial_checkpoints_seed7_vanilla.h5 \
-        --num_episodes 432 \
+        --model_data_path /home/elias/Thesis/action_data/actions_libero_object_distilled.h5 \
+        --vanilla_data_path /home/elias/Thesis/action_data/actions_libero_object_vanilla.h5 \
+        --num_episodes 454 \
         --mode histogram \
         --task_id 1 \
         --save_path action_histograms_task1.png
@@ -43,12 +43,36 @@ import numpy as np
 from tqdm import tqdm
 import umap
 
+# Task ID mapping: evaluation task ID -> training task ID
+# Evaluation uses alphabetical order, training uses dataset order
+# Eval task order (by episode ranges, 20 eps each):
+#   0: alphabet soup, 1: cream cheese, 2: salad dressing, 3: bbq sauce, 4: ketchup
+#   5: tomato sauce, 6: butter, 7: milk, 8: chocolate pudding, 9: orange juice
+# Training task order (from HuggingFace dataset):
+#   0: orange juice, 1: ketchup, 2: cream cheese, 3: bbq sauce, 4: alphabet soup
+#   5: milk, 6: salad dressing, 7: butter, 8: tomato sauce, 9: chocolate pudding
+EVAL_TO_TRAIN_TASK_MAP = {
+    0: 4,   # alphabet soup
+    1: 2,   # cream cheese
+    2: 6,   # salad dressing
+    3: 3,   # bbq sauce
+    4: 1,   # ketchup
+    5: 8,   # tomato sauce
+    6: 7,   # butter
+    7: 5,   # milk
+    8: 9,   # chocolate pudding
+    9: 0,   # orange juice
+}
 
-def load_ground_truth_from_hf(dataset_name="aopolin-lv/libero_spatial_no_noops_lerobot_v21", max_episodes=None, load_states=False):
-    """Load ground truth actions from HuggingFace dataset.
+# Reverse mapping: training task ID -> evaluation task ID
+TRAIN_TO_EVAL_TASK_MAP = {v: k for k, v in EVAL_TO_TRAIN_TASK_MAP.items()}
+
+
+def load_ground_truth_from_hf(dataset_path="/home/elias/Thesis/raw_datasets/libero_object_noops", max_episodes=None, load_states=False):
+    """Load ground truth actions from local HuggingFace dataset.
 
     Args:
-        dataset_name: HuggingFace dataset name
+        dataset_path: Path to local HuggingFace dataset
         max_episodes: Maximum total number of episodes to load (will be distributed across tasks)
         load_states: If True, also load states for UMAP visualization
 
@@ -57,8 +81,8 @@ def load_ground_truth_from_hf(dataset_name="aopolin-lv/libero_spatial_no_noops_l
     """
     from datasets import load_dataset
 
-    print(f"Loading ground truth dataset from HuggingFace: {dataset_name}")
-    dataset = load_dataset(dataset_name, split="train")
+    print(f"Loading ground truth dataset from: {dataset_path}")
+    dataset = load_dataset(dataset_path, split="train")
 
     print(f"Loaded {len(dataset)} timesteps")
     print("Grouping timesteps into episodes...")
@@ -166,8 +190,9 @@ def load_model_rollout_data(h5_path, episodes_per_task=None):
 
     Args:
         h5_path: Path to HDF5 file
-        episodes_per_task: Optional dict mapping task_id -> num_episodes to select.
+        episodes_per_task: Optional dict mapping training_task_id -> num_episodes to select.
                           If provided, will balance episodes across tasks to match GT.
+                          Note: Model H5 files use evaluation task IDs, so we map them.
 
     Returns:
         List of episode dicts
@@ -177,18 +202,22 @@ def load_model_rollout_data(h5_path, episodes_per_task=None):
         all_episode_metadata = f["episode_metadata"][:]
 
     if episodes_per_task is None:
-        # Load all episodes
+        # Load all episodes, mapping eval task_id to training task_id
         episodes_list = []
         for i, metadata in enumerate(all_episode_metadata):
             start_idx = metadata["start_idx"]
             end_idx = metadata["end_idx"]
+            eval_task_id = metadata["task_id"]
+
+            # Map evaluation task ID to training task ID
+            train_task_id = EVAL_TO_TRAIN_TASK_MAP.get(eval_task_id, eval_task_id)
 
             # Get action deltas directly
             action_deltas = all_actions[start_idx:end_idx]  # [T, 7]
 
             episodes_list.append({
                 "episode_idx": metadata["episode_idx"],
-                "task_id": metadata["task_id"],
+                "task_id": train_task_id,  # Use training task ID for consistency with GT
                 "actions": action_deltas,  # [T, 7] - action deltas
                 "success": metadata["success"],
             })
@@ -197,20 +226,23 @@ def load_model_rollout_data(h5_path, episodes_per_task=None):
         print(f"Balancing model episodes to match GT distribution...")
         episodes_list = []
 
-        for task_id, num_episodes_needed in sorted(episodes_per_task.items()):
-            # Find all episodes for this task
-            task_mask = all_episode_metadata["task_id"] == task_id
+        for train_task_id, num_episodes_needed in sorted(episodes_per_task.items()):
+            # Convert training task ID to evaluation task ID for searching in model data
+            eval_task_id = TRAIN_TO_EVAL_TASK_MAP.get(train_task_id, train_task_id)
+
+            # Find all episodes for this task (using eval task ID in model data)
+            task_mask = all_episode_metadata["task_id"] == eval_task_id
             task_episodes_indices = np.where(task_mask)[0]
 
             if len(task_episodes_indices) == 0:
-                print(f"  Warning: Task {task_id} not in model data, skipping")
+                print(f"  Warning: Task {train_task_id} (eval {eval_task_id}) not in model data, skipping")
                 continue
 
             # Take first num_episodes_needed for this task
             selected_indices = task_episodes_indices[:num_episodes_needed]
 
             if len(selected_indices) < num_episodes_needed:
-                print(f"  Warning: Task {task_id} has only {len(selected_indices)} episodes, need {num_episodes_needed}")
+                print(f"  Warning: Task {train_task_id} has only {len(selected_indices)} episodes, need {num_episodes_needed}")
 
             # Add episodes for this task
             for ep_idx in selected_indices:
@@ -223,12 +255,12 @@ def load_model_rollout_data(h5_path, episodes_per_task=None):
 
                 episodes_list.append({
                     "episode_idx": metadata["episode_idx"],
-                    "task_id": metadata["task_id"],
+                    "task_id": train_task_id,  # Use training task ID for consistency with GT
                     "actions": action_deltas,  # [T, 7] - action deltas
                     "success": metadata["success"],
                 })
 
-            print(f"  Task {task_id}: selected {len(selected_indices)} episodes")
+            print(f"  Task {train_task_id} (eval {eval_task_id}): selected {len(selected_indices)} episodes")
 
     print(f"Loaded {len(episodes_list)} model episodes total")
     return episodes_list
@@ -636,8 +668,8 @@ def main():
     parser.add_argument(
         "--hf_dataset",
         type=str,
-        default="aopolin-lv/libero_spatial_no_noops_lerobot_v21",
-        help="HuggingFace dataset name for ground truth"
+        default="/home/elias/Thesis/raw_datasets/libero_object_noops",
+        help="Path to local HuggingFace dataset for ground truth"
     )
     parser.add_argument(
         "--num_episodes",
@@ -662,15 +694,15 @@ def main():
         "--task_id",
         type=int,
         default=None,
-        help="Optional: Filter to visualize only episodes from a specific task (1-10 for libero_spatial)"
+        help="Optional: Filter to visualize only episodes from a specific training task (0-9 for libero_object)"
     )
 
     args = parser.parse_args()
 
     # Load ground truth data FIRST to determine episode distribution
-    print(f"Loading ground truth data from HuggingFace...")
+    print(f"Loading ground truth data...")
     gt_episodes, episodes_per_task = load_ground_truth_from_hf(
-        dataset_name=args.hf_dataset,
+        dataset_path=args.hf_dataset,
         max_episodes=args.num_episodes,
         load_states=False  # No longer need states - using action deltas directly
     )
